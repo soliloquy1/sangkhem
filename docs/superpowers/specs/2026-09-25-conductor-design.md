@@ -62,6 +62,8 @@ helpers in order and hands the narrator a clean brief.
 - Built-in fallback memory for users without a summary extension.
 - Post-processing stages.
 - Parallel stage execution (see "Latency").
+- SnapCompact integration, opt-in (for example imaging the brief or the Memory
+  stage's output). v1 only coexists with SnapCompact.
 - An automated continuity A/B harness.
 - Fine-tuned helper models.
 
@@ -169,7 +171,8 @@ stages and the interface do not assume Summaryception or Laya.
 
 - **Memory source**: `{ id, available(ctx), getSummary(ctx) → string | null }`.
   v1: `summaryception`, `none`.
-- **Lore scorer**: `{ id, available(ctx), async score(candidates, context, signal) → [{ uid, world, relevance, usefulness }] }`.
+- **Lore scorer**: `{ id, available(ctx), async score(candidates, context, { serviceUrl, signal }) → [{ id, relevance, usefulness }] }`,
+  where `id` is `<world>.<uid>`.
   v1: `laya`, `none` (`none` keeps every entry, which is native ST behaviour).
 - **LLM calls** (used by Scene, and later by others) go through
   `ConnectionManagerRequestService.sendRequest(profileId, …)`, so each stage can
@@ -227,6 +230,7 @@ message.extra.conductor = {
   updatedAt,        // ISO timestamp
   source,           // 'scene' | 'manual'
   stale,            // true if the last Observe failed for this message
+  textHash,         // hash of the user message + reply story text it came from
 }
 ```
 
@@ -235,9 +239,16 @@ is the message on screen. User messages never hold state.
 
 ### Lifecycle
 
-ST copies `message.extra` into `swipe_info[swipe_id].extra` and restores it on
-swipe (`syncSwipeToMes` in `script.js`). Storing state on the message therefore
-gives most of the lifecycle for free.
+ST keeps a copy of `message.extra` per swipe in `swipe_info[swipe_id].extra`
+and restores it on swipe (`syncSwipeToMes` in `script.js`). ST takes that copy
+when the reply is saved, which is before Observe runs, so sangkhem writes its
+record to both `message.extra.conductor` and
+`swipe_info[swipe_id].extra.conductor`. Storing state this way gives most of
+the lifecycle for free.
+
+Each record also stores `textHash`, a hash of the user message and the reply's
+story text it was extracted from. A record whose hash no longer matches (the
+message was edited or rewritten) counts as out of date.
 
 | Event | What happens |
 |---|---|
