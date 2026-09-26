@@ -1,0 +1,6 @@
+# Default backend (torch). Validated.
+laya
+
+# Optional native Apple Silicon backend, ~4x faster inference.
+# Install instead of / alongside laya, then run with LAYA_WID_BACKEND=mlx
+# laya-mlx
