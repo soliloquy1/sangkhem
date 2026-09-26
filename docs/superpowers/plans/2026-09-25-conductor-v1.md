@@ -3068,7 +3068,7 @@ git commit -m "feat: add session timing and token stats"
   - `CATCH_UP_LIMIT = 4`, `catchUpIndices(chat, before, settings, limit) → number[]`: AI replies after the last user message whose record is missing or out of date, oldest first. Plan observes all of them (in order) and waits `observeWaitMs` for the last.
   - `createConductor({ deps, stages, suppression, briefStore }) → Conductor`.
   - `deps`: `{ getSettings(), getChat(), getChatId(), getContextView(), names() → { userName, charName }, saveChat() → Promise, setBriefPrompt(text, depth), countTokens(text) → Promise<number>, notify(stageId, reason, count), onUpdate(), now?(), log?(error) }`.
-  - `Conductor`: `plan(coreChat, contextSize, type)`, `observe(mesId, signal)`, event handlers `onMessageReceived(mesId, type)`, `onMessageEdited(mesId)`, `onMessageSwiped(mesId)`, `onMessageDeleted()`, `onGenerationStarted(type, options, dryRun)`, `onGenerationStopped()`, `onGenerationEnded()`, `onChatChanged()`, `onWorldInfoLoaded(data)`; `currentView() → { chatId, index, stateIndex, state, provenance, stale, observed, pending }`; `setState(raw, expected?: { chatId, index }) → Promise<{ ok, error?, state? }>` (refuses when the chat or latest message changed; cancels an in-flight observe of that message); `observe()` discards its result if the record changed while it ran; `editField(path, value) → Promise<{ ok, error?, state? }>`; `retry() → Promise`; `statusText() → string`; `clearBrief()`; `session: { lastPlan, lastObserve, stats }`.
+  - `Conductor`: `plan(coreChat, contextSize, type)`, `observe(mesId, signal)`, event handlers `onMessageReceived(mesId, type)`, `onMessageEdited(mesId)`, `onMessageSwiped(mesId)`, `onMessageDeleted()`, `onGenerationStarted(type, options, dryRun)`, `onGenerationStopped()`, `onGenerationEnded()`, `onChatChanged()`, `onWorldInfoLoaded(data)`; `currentView() → { chatId, index, stateIndex, state, textHash, provenance, stale, observed, pending }`; `setState(raw, expected?: { chatId, index, textHash }) → Promise<{ ok, error?, state? }>` (refuses when the chat, the latest message, or its text changed; cancels an in-flight observe of that message; stamps the record with the message's current text hash so Plan never re-extracts over the edit); `observe()` discards its result if the record changed while it ran; `editField(path, value) → Promise<{ ok, error?, state? }>`; `retry() → Promise`; `statusText() → string`; `clearBrief()`; `session: { lastPlan, lastObserve, stats }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3383,6 +3383,7 @@ test('setState refuses a draft from another chat or an older message', async () 
     const h = harness({ chat: [user('u'), ai('roof')] });
     const view = h.conductor.currentView();
     assert.deepEqual([view.chatId, view.index], ['chat-1', 1]);
+    assert.match(view.textHash, /^[0-9a-f]{8}$/);
     h.switchChat('chat-2');
     assert.match((await h.conductor.setState(view.state, { chatId: view.chatId, index: view.index })).error, /chat changed/);
     h.switchChat('chat-1');
@@ -3405,6 +3406,34 @@ test('continue cancels the pending observe for the last message', async () => {
     h.conductor.onGenerationStarted('continue', {}, false);
     await sleep(40);
     assert.equal(h.scene.calls.length, 0);
+});
+
+test('a manual edit on a reply with no record survives the next plan', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ delay: 30 }) });
+    const running = h.conductor.retry();
+    await sleep(5);
+    await h.conductor.editField('location', 'library');
+    await running;
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual([h.chat[1].extra.conductor.source, h.chat[1].extra.conductor.state.location], ['manual', 'library']);
+    assert.match(lastPrompt(h.calls), /Location: library/);
+});
+
+test('in commit mode a manual edit is not re-extracted at the next plan', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.editField('location', 'library');
+    await h.conductor.plan([], 8000, 'normal');
+    assert.equal(h.scene.calls.length, 0);
+    assert.equal(h.chat[1].extra.conductor.state.location, 'library');
+});
+
+test('setState refuses a draft opened on a different swipe of the same message', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')] });
+    const view = h.conductor.currentView();
+    h.chat[1].mes = 'garden';
+    const result = await h.conductor.setState(view.state, { chatId: view.chatId, index: view.index, textHash: view.textHash });
+    assert.match(result.error, /message changed/);
+    assert.equal(h.chat[1].extra.conductor, undefined);
 });
 
 test('statusText summarises state', async () => {
@@ -3663,6 +3692,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         const { state, record, index: stateIndex } = readState(chat);
         return {
             chatId: deps.getChatId(), index, stateIndex, state,
+            textHash: index >= 0 ? observeInput(chat, index, settings()).textHash : null,
             provenance: record?.provenance ?? {},
             stale: Boolean(own?.stale),
             observed: Boolean(own?.state),
@@ -3671,8 +3701,10 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
     }
 
     /**
-     * Saves a manual edit onto the latest AI message. `expected` ({ chatId, index } from the view the
-     * edit started from) refuses the save if the chat or the latest message changed since.
+     * Saves a manual edit onto the latest AI message. `expected` ({ chatId, index, textHash } from the
+     * view the edit started from) refuses the save if the chat, the latest message, or that message's
+     * text (swipe, regenerate, edit) changed since. The record is stamped with the message's current
+     * text hash, so Plan treats it as current and never re-extracts over the edit.
      */
     async function setState(raw, expected = {}) {
         const checked = validateState(raw, { threadsCap: settings().stages.scene.threadsCap });
@@ -3686,12 +3718,16 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         if ('index' in expected && expected.index !== index) {
             return { ok: false, error: 'a newer message arrived since you started editing, so the edit was not saved' };
         }
+        const { textHash } = observeInput(chat, index, settings());
+        if ('textHash' in expected && expected.textHash !== textHash) {
+            return { ok: false, error: 'the message changed since you started editing (swiped, regenerated or edited), so the edit was not saved' };
+        }
         scheduler.cancel(index); // an extraction in flight must not overwrite the edit
         const { state: prev, record } = readState(chat);
         const provenance = { ...(record?.provenance ?? {}) };
         for (const path of diffPaths(prev, checked.state)) provenance[path] = { mesId: null, quote: null, manual: true };
         writeRecord(chat[index], makeRecord({
-            state: checked.state, provenance, source: 'manual', textHash: chat[index].extra?.conductor?.textHash ?? null,
+            state: checked.state, provenance, source: 'manual', textHash,
         }));
         await deps.saveChat();
         deps.onUpdate();
@@ -4134,7 +4170,7 @@ git commit -m "feat: wire conductor into SillyTavern with commands"
 - Produces:
   - `h(tag, props = {}, children = [], doc = globalThis.document) → Element` — text only via `textContent`/text nodes. Supported props: `class`, `text`, `value`, `checked`, `type`, `title`, `placeholder`, `rows`, `data-*`, `on<event>`. Anything else throws.
   - `format.js`: `reportLine(report)`, `statsLines(summary)`, `briefDoubleWarning(mode, promptTexts)`, `cacheHint({ source, model, protectCachePrefix })`, `provenanceText(entry)`.
-  - `panel.js`: `initPanel({ conductor, stages, laya })`, `refreshPanel()`. A scene draft remembers the chat id and message index it was opened for; a draft for another chat or an older message is dropped on refresh and refused on save.
+  - `panel.js`: `initPanel({ conductor, stages, laya })`, `refreshPanel()`. A scene draft remembers the chat id, message index and message text hash it was opened for; a draft for another chat, an older message, or another swipe is dropped on refresh and refused on save.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4591,9 +4627,9 @@ import { renderInspector } from './inspector.js';
 let root = null;
 let deps = null;
 let sceneDirty = false;
-let draftKey = null; // chat and message the open draft belongs to
+let draftKey = null; // chat, message and message text the open draft belongs to
 
-const viewKey = (view) => `${view.chatId}:${view.index}`;
+const viewKey = (view) => `${view.chatId}:${view.index}:${view.textHash}`;
 
 export async function initPanel(options) {
     deps = options;
@@ -4617,7 +4653,7 @@ function renderScene(view = deps.conductor.currentView()) {
         fields: getSettings().stages.scene.fields,
         onDirty: () => { sceneDirty = true; },
         onSave: async (draft) => {
-            const result = await deps.conductor.setState(draft, { chatId: view.chatId, index: view.index });
+            const result = await deps.conductor.setState(draft, { chatId: view.chatId, index: view.index, textHash: view.textHash });
             if (!result.ok) {
                 toastr.warning(result.error, 'sangkhem', { escapeHtml: true });
                 return;
