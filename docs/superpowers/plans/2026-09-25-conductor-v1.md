@@ -4629,6 +4629,7 @@ import { getSettings, getContextView, presetPromptTexts, currentSource, currentM
 import { mountSettings, bindSettings, fillProfiles } from './settingsForm.js';
 import { renderScenePanel } from './scenePanel.js';
 import { renderInspector } from './inspector.js';
+import { applyDraftChanges } from './draft.js';
 
 let root = null;
 let deps = null;
@@ -4659,7 +4660,15 @@ function renderScene(view = deps.conductor.currentView()) {
         fields: getSettings().stages.scene.fields,
         onDirty: () => { sceneDirty = true; },
         onSave: async (draft) => {
-            const result = await deps.conductor.setState(draft, { chatId: view.chatId, index: view.index, textHash: view.textHash });
+            if (!sceneDirty) return; // nothing edited: saving would only freeze extraction for this message
+            // Apply only the user's own changes onto the latest state, so an extraction that finished
+            // while the draft was open is not reverted.
+            const merged = applyDraftChanges(view.state, draft, deps.conductor.currentView().state);
+            if (!merged.ok) {
+                toastr.warning(merged.error, 'sangkhem', { escapeHtml: true });
+                return;
+            }
+            const result = await deps.conductor.setState(merged.state, { chatId: view.chatId, index: view.index, textHash: view.textHash });
             if (!result.ok) {
                 toastr.warning(result.error, 'sangkhem', { escapeHtml: true });
                 return;
