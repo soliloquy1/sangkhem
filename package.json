@@ -1,0 +1,14 @@
+{
+    "name": "sangkhem",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "SillyTavern extension: a conductor that runs small helper stages around your narrator model.",
+    "license": "MIT",
+    "scripts": {
+        "test": "node --test"
+    },
+    "engines": {
+        "node": ">=20"
+    }
+}

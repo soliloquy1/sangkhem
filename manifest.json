@@ -1,0 +1,13 @@
+{
+    "display_name": "sangkhem",
+    "loading_order": 200,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "soliloquy1",
+    "version": "0.1.0",
+    "homePage": "https://github.com/soliloquy1/sangkhem",
+    "auto_update": false,
+    "generate_interceptor": "conductorInterceptor"
+}

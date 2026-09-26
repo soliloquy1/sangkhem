@@ -1,0 +1,4 @@
+node_modules/
+.DS_Store
+service/laya/.venv/
+service/laya/__pycache__/
