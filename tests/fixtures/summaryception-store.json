@@ -1,0 +1,13 @@
+{
+    "layers": [
+        [
+            { "text": "Mara and Ellen search the kitchen for the shark plushie.", "turnRange": [11, 16], "timestamp": 1790309645917 },
+            { "text": "Ellen admits she owes Mara a favor.", "turnRange": [17, 22], "timestamp": 1790310359705 }
+        ],
+        [
+            { "text": "Mara moves into Victoria Housekeeping's building.", "turnRange": [0, 10], "timestamp": 1790308840269 }
+        ]
+    ],
+    "summarizedUpTo": 22,
+    "ghostedIndices": [0, 1, 2]
+}
