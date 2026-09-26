@@ -1,0 +1,91 @@
+<div id="sangkhem-settings" class="sangkhem-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>sangkhem</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label"><input type="checkbox" data-sk-setting="enabled"> Enable conductor</label>
+            <div id="sangkhem-warnings"></div>
+
+            <h4>Stages</h4>
+            <div id="sangkhem-stage-status"></div>
+
+            <h4>Scene</h4>
+            <div id="sangkhem-scene-panel"></div>
+
+            <h4>Last turn</h4>
+            <div id="sangkhem-inspector"></div>
+
+            <details class="sk-settings">
+                <summary>Settings</summary>
+
+                <h5>General</h5>
+                <label>Plan budget (ms) <input class="text_pole" type="number" min="0" data-sk-setting="planBudgetMs"></label>
+                <label>Observe
+                    <select class="text_pole" data-sk-setting="observeTrigger">
+                        <option value="settled">after each reply settles (no delay before replies)</option>
+                        <option value="commit">when I send my next message (fewer calls, adds delay)</option>
+                    </select>
+                </label>
+                <label>Settle delay (ms) <input class="text_pole" type="number" min="0" data-sk-setting="settleMs"></label>
+                <label>Wait for scene tracking before a reply (ms) <input class="text_pole" type="number" min="0" data-sk-setting="observeWaitMs"></label>
+                <label>Warn after this many failures in a row <input class="text_pole" type="number" min="1" data-sk-setting="failureToastAfter"></label>
+
+                <h5>Memory</h5>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.memory.enabled"> Enabled</label>
+                <label>Source
+                    <select class="text_pole" data-sk-setting="stages.memory.backend">
+                        <option value="summaryception">Summaryception</option>
+                        <option value="none">None</option>
+                    </select>
+                </label>
+
+                <h5>Lore</h5>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.lore.enabled"> Enabled</label>
+                <label>Scorer
+                    <select class="text_pole" data-sk-setting="stages.lore.backend">
+                        <option value="laya">Laya (local service)</option>
+                        <option value="none">None</option>
+                    </select>
+                </label>
+                <label>Service URL <input class="text_pole" type="text" data-sk-setting="stages.lore.serviceUrl"></label>
+                <button id="sangkhem-lore-test" class="menu_button" type="button">Test connection</button>
+                <label>Timeout (ms) <input class="text_pole" type="number" min="0" data-sk-setting="stages.lore.timeoutMs"></label>
+                <label>Max candidates scored <input class="text_pole" type="number" min="1" data-sk-setting="stages.lore.maxCandidates"></label>
+                <label>Token budget for kept entries <input class="text_pole" type="number" min="0" data-sk-setting="stages.lore.budgetTokens"></label>
+                <label>Recent turns sent to the scorer <input class="text_pole" type="number" min="1" data-sk-setting="stages.lore.recentTurns"></label>
+                <label>Relevance weight <input class="text_pole" type="number" step="0.1" data-sk-setting="stages.lore.wRelevance"></label>
+                <label>Usefulness weight <input class="text_pole" type="number" step="0.1" data-sk-setting="stages.lore.wUsefulness"></label>
+                <label>Minimum score to keep <input class="text_pole" type="number" step="0.1" data-sk-setting="stages.lore.minScore"></label>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.lore.protectCachePrefix"> Protect cache prefix (only judge @depth entries)</label>
+
+                <h5>Brief</h5>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.brief.enabled"> Enabled</label>
+                <label>Placement
+                    <select class="text_pole" data-sk-setting="stages.brief.mode">
+                        <option value="auto">Auto-inject in chat</option>
+                        <option value="macro">Only via {{conductor_brief}}</option>
+                    </select>
+                </label>
+                <label>Chat depth <input class="text_pole" type="number" min="0" data-sk-setting="stages.brief.depth"></label>
+                <label>Template ({{scene}} is replaced) <textarea class="text_pole" rows="5" data-sk-setting="stages.brief.template"></textarea></label>
+
+                <h5>Scene tracking</h5>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.scene.enabled"> Enabled</label>
+                <label>Connection profile (pick a small or free model)
+                    <select class="text_pole" data-sk-setting="stages.scene.profileId"></select>
+                </label>
+                <label>Timeout (ms) <input class="text_pole" type="number" min="0" data-sk-setting="stages.scene.timeoutMs"></label>
+                <label>Max reply tokens <input class="text_pole" type="number" min="100" data-sk-setting="stages.scene.maxTokens"></label>
+                <label>Temperature (also used by the eval tool) <input class="text_pole" type="number" min="0" max="2" step="0.1" data-sk-setting="stages.scene.temperature"></label>
+                <label>Max open threads <input class="text_pole" type="number" min="1" data-sk-setting="stages.scene.threadsCap"></label>
+                <label>Story tags (comma separated) <input class="text_pole" type="text" data-sk-setting="stages.scene.storyTags"></label>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.scene.fields.location"> Track location</label>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.scene.fields.time"> Track time</label>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.scene.fields.present"> Track who is present</label>
+                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.scene.fields.threads"> Track open threads</label>
+            </details>
+        </div>
+    </div>
+</div>

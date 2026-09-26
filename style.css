@@ -1,1 +1,16 @@
-/* Filled in Task 14. */
+.sangkhem-settings h4 { margin: 0.8em 0 0.3em; }
+.sangkhem-settings h5 { margin: 0.8em 0 0.2em; opacity: 0.8; }
+.sangkhem-settings label { display: block; margin: 0.25em 0; }
+.sk-muted { opacity: 0.7; font-style: italic; }
+.sk-warning, .sk-stale { border-left: 3px solid var(--warning, #d9a400); padding: 0.3em 0.5em; margin: 0.3em 0; }
+.sk-status.sk-ready::before { content: '● '; color: #3a9d5d; }
+.sk-status.sk-unavailable::before { content: '● '; color: #d9a400; }
+.sk-status.sk-off::before { content: '○ '; opacity: 0.6; }
+.sk-person { display: grid; grid-template-columns: repeat(4, 1fr) auto; gap: 0.25em; margin: 0.2em 0; }
+.sk-field { margin: 0.4em 0; }
+.sk-section { margin: 0.4em 0; }
+.sk-line, .sk-prov-row { font-size: 0.9em; }
+.sk-brief { white-space: pre-wrap; font-size: 0.85em; opacity: 0.85; }
+.sk-link { background: none; border: none; color: var(--SmartThemeQuoteColor, inherit); cursor: pointer; padding: 0; text-align: left; }
+.sk-actions { display: flex; gap: 0.5em; margin-top: 0.5em; }
+@media (max-width: 600px) { .sk-person { grid-template-columns: 1fr 1fr; } }
