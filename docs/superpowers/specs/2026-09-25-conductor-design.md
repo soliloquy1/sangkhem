@@ -332,7 +332,9 @@ A port of Laya WI Director's lore path into a stage.
 Kept entries stay at the positions their lorebook authors set. Lore is not
 moved into the brief.
 
-Backend `laya` talks to the Laya service (`POST /wi-director`, `GET /health`).
+Backend `laya` talks to the Laya service (`POST /wi-director`, `GET /health`). It counts as unavailable until the service has answered once: the first check starts a
+`/health` probe in the background, and a changed service URL is checked again, so users without the
+service never pay for a dry-run scan or a refused request.
 The repo ships a copy at `service/laya/server.py`, with the same endpoints as
 the Laya WI Director copy, so either one can serve the default URL
 `http://localhost:8666`.
@@ -392,8 +394,9 @@ Setting `observeTrigger`:
 Observes run one at a time, in message order, so each reply's extraction
 builds on the state the previous reply's extraction wrote.
 
-In both modes, Plan looks at the AI replies since the last user message (up to
-4, stopping at one whose record is current). Any that are unobserved or out of
+In both modes, Plan looks at the latest run of AI replies before the message being
+generated for (SillyTavern appends the user's new message before Plan runs, so Plan
+steps over it; up to 4 replies, stopping at one whose record is current). Any that are unobserved or out of
 date are observed now, oldest first, and Plan waits up to `observeWaitMs`
 (default 4000) for the last one. This covers group turns, commit mode, and the
 latest reply of a chat from before install. If the wait runs out, Plan uses the

@@ -1098,6 +1098,7 @@ git commit -m "feat: add scene state schema, lookup and per-swipe records"
 
 `tests/evidence.test.js`:
 ```js
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalize, verifyQuote, quoteProblem, diffPaths, applyEvidenceGate } from '../src/evidence.js';
@@ -2271,27 +2272,56 @@ import { createLayaScorer, DOWN_RETRY_MS } from '../src/backends/scorers/laya.js
 import { BackendUnavailableError } from '../src/backends/resolve.js';
 
 const ok = (body) => ({ ok: true, status: 200, json: async () => body });
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const at = (url) => () => url;
 
 test('posts candidates and maps results', async () => {
     const requests = [];
-    const scorer = createLayaScorer({ fetchImpl: async (url, init) => { requests.push([url, JSON.parse(init.body)]); return ok({ results: [{ id: 'w.1', relevance: 4, usefulness: '3' }, { bad: true }] }); } });
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x:1'), fetchImpl: async (url, init) => { requests.push([url, JSON.parse(init.body)]); return ok({ results: [{ id: 'w.1', relevance: 4, usefulness: '3' }, { bad: true }] }); } });
     const result = await scorer.score([{ id: 'w.1', content: 'lore' }], { message: 'm', recent: ['r'] }, { serviceUrl: 'http://x:1/' });
     assert.deepEqual(result, [{ id: 'w.1', relevance: 4, usefulness: 3 }]);
     assert.equal(requests[0][0], 'http://x:1/wi-director');
     assert.deepEqual(requests[0][1], { message: 'm', recent_turns: ['r'], candidates: [{ id: 'w.1', content: 'lore' }] });
-});
-
-test('a network error marks the service down until the retry time', async () => {
-    let clock = 1000;
-    const scorer = createLayaScorer({ fetchImpl: async () => { throw new TypeError('fetch failed'); }, now: () => clock });
-    await assert.rejects(scorer.score([], { message: '', recent: [] }, { serviceUrl: 'http://x' }), BackendUnavailableError);
-    assert.match(scorer.available(), /Laya service unreachable/);
-    clock += DOWN_RETRY_MS;
     assert.equal(scorer.available(), true);
 });
 
-test('an HTTP error is a plain failure', async () => {
-    const scorer = createLayaScorer({ fetchImpl: async () => ({ ok: false, status: 500 }) });
+test('a fresh scorer stays unavailable until the service answers a health probe', async () => {
+    const urls = [];
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x'), fetchImpl: async (url) => { urls.push(url); return ok({ status: 'ok' }); } });
+    assert.match(scorer.available(), /checking the Laya service at http:\/\/x/);
+    await tick();
+    assert.deepEqual(urls, ['http://x/health']);
+    assert.equal(scorer.available(), true);
+});
+
+test('a fresh scorer with no service reports it unreachable after the probe', async () => {
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x'), fetchImpl: async () => { throw new TypeError('fetch failed'); } });
+    assert.match(scorer.available(), /checking/);
+    await tick();
+    assert.match(scorer.available(), /Laya service unreachable at http:\/\/x/);
+});
+
+test('changing the service URL checks again', async () => {
+    let url = 'http://a';
+    const scorer = createLayaScorer({ getServiceUrl: () => url, fetchImpl: async () => ok({ status: 'ok' }) });
+    scorer.available();
+    await tick();
+    assert.equal(scorer.available(), true);
+    url = 'http://b';
+    assert.match(scorer.available(), /checking the Laya service at http:\/\/b/);
+});
+
+test('a network error marks the service down until the retry time, then probes again', async () => {
+    let clock = 1000;
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x'), fetchImpl: async () => { throw new TypeError('fetch failed'); }, now: () => clock });
+    await assert.rejects(scorer.score([], { message: '', recent: [] }, { serviceUrl: 'http://x' }), BackendUnavailableError);
+    assert.match(scorer.available(), /Laya service unreachable/);
+    clock += DOWN_RETRY_MS;
+    assert.match(scorer.available(), /checking the Laya service/);
+});
+
+test('an HTTP error is a plain failure and the service counts as reachable', async () => {
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x'), fetchImpl: async () => ({ ok: false, status: 500 }) });
     await assert.rejects(scorer.score([], { message: '', recent: [] }, { serviceUrl: 'http://x' }), /returned 500/);
     assert.equal(scorer.available(), true);
 });
@@ -2299,9 +2329,9 @@ test('an HTTP error is a plain failure', async () => {
 test('an aborted request does not mark the service down', async () => {
     const controller = new AbortController();
     controller.abort();
-    const scorer = createLayaScorer({ fetchImpl: async () => { throw new DOMException('aborted', 'AbortError'); } });
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x'), fetchImpl: async () => { throw new DOMException('aborted', 'AbortError'); } });
     await assert.rejects(scorer.score([], { message: '', recent: [] }, { serviceUrl: 'http://x', signal: controller.signal }), /aborted/);
-    assert.equal(scorer.available(), true);
+    assert.doesNotMatch(String(scorer.available()), /unreachable/);
 });
 
 test('health gives up on a host that never answers', async () => {
@@ -2315,7 +2345,7 @@ test('health gives up on a host that never answers', async () => {
 
 test('health checks /health and clears the down state', async () => {
     let up = false;
-    const scorer = createLayaScorer({ fetchImpl: async (url) => { if (!up) throw new TypeError('down'); assert.equal(url, 'http://x/health'); return ok({ status: 'ok' }); } });
+    const scorer = createLayaScorer({ getServiceUrl: at('http://x'), fetchImpl: async (url) => { if (!up) throw new TypeError('down'); assert.equal(url, 'http://x/health'); return ok({ status: 'ok' }); } });
     await assert.rejects(scorer.score([], { message: '', recent: [] }, { serviceUrl: 'http://x' }));
     assert.notEqual(scorer.available(), true);
     assert.equal(await scorer.health('http://x'), false);
@@ -2490,20 +2520,58 @@ export const HEALTH_TIMEOUT_MS = 3000;
 
 const trimUrl = (url) => String(url ?? '').replace(/\/+$/, '');
 
-/** Scores lore entries with the local Laya service (POST /wi-director, GET /health). */
-export function createLayaScorer({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now } = {}) {
+/**
+ * Scores lore entries with the local Laya service (POST /wi-director, GET /health).
+ * The service counts as unavailable until it has answered once: the first availability check starts
+ * a /health probe in the background, so users without the service never pay for a dry-run scan or a
+ * refused request. A changed service URL is checked again.
+ */
+export function createLayaScorer({
+    fetchImpl = (...args) => globalThis.fetch(...args),
+    now = Date.now,
+    getServiceUrl = () => 'http://localhost:8666',
+} = {}) {
+    let status = 'unknown'; // 'unknown' | 'checking' | 'up' | 'down'
+    let checkedUrl = null;
     let downUntil = 0;
+    const markUp = (url) => { status = 'up'; checkedUrl = url; downUntil = 0; };
+    const markDown = (url) => { status = 'down'; checkedUrl = url; downUntil = now() + DOWN_RETRY_MS; };
+
+    async function health(serviceUrl) {
+        const url = trimUrl(serviceUrl);
+        try {
+            const response = await fetchImpl(`${url}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+            if (response.ok) markUp(url);
+            else markDown(url);
+            return response.ok;
+        } catch {
+            markDown(url);
+            return false;
+        }
+    }
+
     return {
         id: 'laya',
         label: 'Laya',
         available() {
-            if (now() < downUntil) return `Laya service unreachable; retrying in ${Math.ceil((downUntil - now()) / 1000)} s`;
-            return true;
+            const url = trimUrl(getServiceUrl());
+            if (url !== checkedUrl && status !== 'checking') status = 'unknown';
+            if (status === 'up') return true;
+            if (status === 'down' && now() < downUntil) {
+                return `Laya service unreachable at ${url}; retrying in ${Math.ceil((downUntil - now()) / 1000)} s`;
+            }
+            if (status !== 'checking') {
+                status = 'checking';
+                checkedUrl = url;
+                void health(url);
+            }
+            return `checking the Laya service at ${url}`;
         },
         async score(candidates, context, { serviceUrl, signal } = {}) {
+            const url = trimUrl(serviceUrl);
             let response;
             try {
-                response = await fetchImpl(`${trimUrl(serviceUrl)}/wi-director`, {
+                response = await fetchImpl(`${url}/wi-director`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: context.message, recent_turns: context.recent, candidates }),
@@ -2511,25 +2579,17 @@ export function createLayaScorer({ fetchImpl = (...args) => globalThis.fetch(...
                 });
             } catch (error) {
                 if (signal?.aborted) throw error;
-                downUntil = now() + DOWN_RETRY_MS;
+                markDown(url);
                 throw new BackendUnavailableError(`Laya service unreachable at ${serviceUrl}`);
             }
+            markUp(url); // it answered, even if with an error
             if (!response.ok) throw new Error(`Laya service returned ${response.status}`);
             const data = await response.json();
-            downUntil = 0;
             return (data?.results ?? [])
                 .filter((r) => typeof r?.id === 'string')
                 .map((r) => ({ id: r.id, relevance: Number(r.relevance) || 0, usefulness: Number(r.usefulness) || 0 }));
         },
-        async health(serviceUrl) {
-            try {
-                const response = await fetchImpl(`${trimUrl(serviceUrl)}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
-                if (response.ok) downUntil = 0;
-                return response.ok;
-            } catch {
-                return false;
-            }
-        },
+        health,
     };
 }
 ```
@@ -2996,6 +3056,11 @@ Expected: FAIL, module not found.
 
 `src/stats.js`:
 ```js
+/**
+ * Creates a statistics tracker with the specified limit for rolling windows.
+ * @param {number} limit - Maximum number of values to keep per list (default 200)
+ * @returns {object} Stats object with planMs, briefTokens, droppedTokens, and stageMs
+ */
 export function createStats(limit = 200) {
     return { limit, planMs: [], briefTokens: [], droppedTokens: [], stageMs: {} };
 }
@@ -3005,7 +3070,12 @@ function push(list, value, limit) {
     if (list.length > limit) list.shift();
 }
 
-/** Nearest-rank percentile, or null for no values. */
+/**
+ * Calculates the nearest-rank percentile of a sorted array.
+ * @param {number[]} values - Array of values (need not be sorted)
+ * @param {number} p - Percentile (0-100)
+ * @returns {number|null} The percentile value, or null if no values
+ */
 export function percentile(values, p) {
     if (!values.length) return null;
     const sorted = [...values].sort((a, b) => a - b);
@@ -3013,12 +3083,22 @@ export function percentile(values, p) {
     return sorted[Math.min(sorted.length - 1, Math.max(0, rank))];
 }
 
+/**
+ * Records stage execution times for stages that ran.
+ * @param {object} stats - The stats object from createStats
+ * @param {object[]} reports - Array of stage reports with id, status, and ms
+ */
 export function recordStageTimes(stats, reports) {
     for (const report of reports) {
         if (report.status === 'ran') push(stats.stageMs[report.id] ??= [], report.ms, stats.limit);
     }
 }
 
+/**
+ * Records a plan execution with duration, stage times, and token metrics.
+ * @param {object} stats - The stats object from createStats
+ * @param {object} data - Plan data with ms, reports, briefTokens, droppedTokens
+ */
 export function recordPlan(stats, { ms, reports, briefTokens, droppedTokens }) {
     push(stats.planMs, ms, stats.limit);
     push(stats.briefTokens, briefTokens, stats.limit);
@@ -3028,6 +3108,11 @@ export function recordPlan(stats, { ms, reports, briefTokens, droppedTokens }) {
 
 const average = (values) => (values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : null);
 
+/**
+ * Generates a summary of statistics with percentiles and averages.
+ * @param {object} stats - The stats object from createStats
+ * @returns {object} Summary with turns, plan percentiles, stage stats, and token averages
+ */
 export function summarizeStats(stats) {
     return {
         turns: stats.planMs.length,
@@ -3065,7 +3150,7 @@ git commit -m "feat: add session timing and token stats"
 - Consumes: `runPhase`, `FailureTracker` (Task 2); state helpers (Task 3); `diffPaths` (Task 4); `extractStory`, `parseTagList` (Task 5); `applySuppression` (Task 9); `ObserveScheduler` (Task 10); stats (Task 11); `createBriefStage` (Task 6, tests only).
 - Produces:
   - `observeInput(chat, mesId, settings) → { userText, replyText, textHash }`.
-  - `CATCH_UP_LIMIT = 4`, `catchUpIndices(chat, before, settings, limit) → number[]`: AI replies after the last user message whose record is missing or out of date, oldest first. Plan observes all of them (in order) and waits `observeWaitMs` for the last.
+  - `CATCH_UP_LIMIT = 4`, `catchUpIndices(chat, before, settings, limit) → number[]`: the latest run of AI replies before `before` (stepping over the user's just-appended message) whose record is missing or out of date, oldest first. Plan observes all of them (in order) and waits `observeWaitMs` for the last.
   - `createConductor({ deps, stages, suppression, briefStore }) → Conductor`.
   - `deps`: `{ getSettings(), getChat(), getChatId(), getContextView(), names() → { userName, charName }, saveChat() → Promise, setBriefPrompt(text, depth), countTokens(text) → Promise<number>, notify(stageId, reason, count), onUpdate(), now?(), log?(error) }`.
   - `Conductor`: `plan(coreChat, contextSize, type)`, `observe(mesId, signal)`, event handlers `onMessageReceived(mesId, type)`, `onMessageEdited(mesId)`, `onMessageSwiped(mesId)`, `onMessageDeleted()`, `onGenerationStarted(type, options, dryRun)`, `onGenerationStopped()`, `onGenerationEnded()`, `onChatChanged()`, `onWorldInfoLoaded(data)`; `currentView() → { chatId, index, stateIndex, state, textHash, provenance, stale, observed, pending }`; `setState(raw, expected?: { chatId, index, textHash }) → Promise<{ ok, error?, state? }>` (refuses when the chat, the latest message, or its text changed; cancels an in-flight observe of that message; stamps the record with the message's current text hash so Plan never re-extracts over the edit); `observe()` discards its result if the record changed while it ran; `editField(path, value) → Promise<{ ok, error?, state? }>`; `retry() → Promise`; `statusText() → string`; `clearBrief()`; `session: { lastPlan, lastObserve, stats }`.
@@ -3392,12 +3477,64 @@ test('setState refuses a draft from another chat or an older message', async () 
     assert.equal((await h.conductor.setState(view.state, { chatId: 'chat-1', index: 3 })).ok, true);
 });
 
-test('a stale copy of a manual record is labelled scene, not manual', async () => {
+test('a failed observe keeps this message\'s own hand edit as manual, so Retry builds on it', async () => {
     const h = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ fail: true }) });
     h.chat[1].extra = { conductor: makeRecord({ state: validateState({ location: 'library' }).state, source: 'manual' }) };
     await h.conductor.retry();
     const rec = h.chat[1].extra.conductor;
-    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'scene', 'library']);
+    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'manual', 'library']);
+    await h.conductor.retry();
+    assert.equal(h.scene.calls[1].prevLocation, 'library');
+});
+
+test('a stale copy of an earlier message\'s state is labelled scene', async () => {
+    const h = harness({ chat: [ai('a'), user('u'), ai('b')], scene: fakeScene({ fail: true }) });
+    h.chat[0].extra = { conductor: makeRecord({ state: validateState({ location: 'kitchen' }).state, source: 'manual' }) };
+    await h.conductor.retry();
+    const rec = h.chat[2].extra.conductor;
+    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'scene', 'kitchen']);
+});
+
+test('in ST order (user message already appended) plan catches up the previous reply', async () => {
+    const h = harness({ chat: [user('u1'), ai('rooftop'), user('u2')], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual(h.scene.calls.map((c) => c.mesId), [1]);
+    assert.match(lastPrompt(h.calls), /Location: rooftop/);
+});
+
+test('in ST order a group turn is caught up in order', async () => {
+    const lycaon = { ...ai('in the rain'), name: 'Lycaon' };
+    const h = harness({ chat: [user('u1'), ai('on the roof'), lycaon, user('u2')], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual(h.scene.calls.map((c) => [c.mesId, c.prevLocation]), [[1, ''], [2, 'on the roof']]);
+});
+
+test('in ST order plan waits for the pending observe of the reply before the new message', async () => {
+    const h = harness({ chat: [user('u1'), ai('roof')], overrides: { settleMs: 10000 } });
+    h.conductor.onMessageReceived(1, 'normal');
+    h.chat.push(user('u2'));
+    await h.conductor.plan([], 8000, 'normal');
+    assert.equal(h.scene.calls.length, 1);
+    assert.match(lastPrompt(h.calls), /Location: roof/);
+});
+
+test('in ST order a swipe reads state from before the replaced reply', async () => {
+    const h = harness({ chat: [user('u1'), ai('a'), user('u2'), ai('b')] });
+    record(h.chat, 1, h.settings, { location: 'A' });
+    record(h.chat, 3, h.settings, { location: 'B' });
+    await h.conductor.plan([], 8000, 'swipe');
+    assert.equal(h.scene.calls.length, 0);
+    assert.match(lastPrompt(h.calls), /Location: A/);
+});
+
+test('stopping the generation ends the observe wait at once', async () => {
+    const h = harness({ chat: [user('u1'), ai('roof'), user('u2')], overrides: { observeWaitMs: 5000, planBudgetMs: 8000 }, scene: fakeScene({ delay: 300 }) });
+    const started = Date.now();
+    const planning = h.conductor.plan([], 8000, 'normal');
+    await sleep(20);
+    h.conductor.onGenerationStopped();
+    await planning;
+    assert.ok(Date.now() - started < 200);
 });
 
 test('continue cancels the pending observe for the last message', async () => {
@@ -3477,12 +3614,16 @@ export function observeInput(chat, mesId, settings) {
 }
 
 /**
- * AI replies in the current run (after the last user message, before `before`) whose record is
- * missing or out of date, oldest first. Stops at the first reply with a current record.
+ * The latest run of AI replies before `before` (back to the user message that precedes them) whose
+ * record is missing or out of date, oldest first. Stops at the first reply with a current record.
+ * At plan time ST has already appended the user's new message, so trailing non-AI messages are
+ * stepped over first.
  */
 export function catchUpIndices(chat, before, settings, limit = CATCH_UP_LIMIT) {
     const indices = [];
-    for (let i = Math.min(before, chat.length) - 1; i >= 0 && indices.length < limit; i--) {
+    let start = Math.min(before, chat.length) - 1;
+    while (start >= 0 && !isAiMessage(chat[start])) start--;
+    for (let i = start; i >= 0 && indices.length < limit; i--) {
         const message = chat[i];
         if (message?.is_user) break;
         if (!isAiMessage(message)) continue;
@@ -3530,7 +3671,8 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         if (!isAiMessage(message)) return;
         const input = observeInput(chat, mesId, current);
         const recordAtStart = message.extra?.conductor;
-        const base = ownManualState(message) ?? readState(chat, { before: mesId });
+        const ownManual = ownManualState(message);
+        const base = ownManual ?? readState(chat, { before: mesId });
         const { userName, charName } = deps.names();
         const result = await runPhase(stages, {
             phase: 'observe',
@@ -3559,9 +3701,10 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
                 state: result.state, provenance: result.outputs.scene?.provenance ?? {}, source: 'scene', textHash: input.textHash,
             }));
         } else if (scene?.status === 'failed') {
-            // Labelled 'scene' even when copied from a manual record: it is not a new edit by the user.
+            // A copy of this message's own hand edit stays 'manual' so Retry still builds on it; a copy of
+            // an earlier message's state is labelled 'scene', because it is not an edit of this message.
             writeRecord(message, makeRecord({
-                state: base.state, provenance: base.record?.provenance ?? {}, source: 'scene',
+                state: base.state, provenance: base.record?.provenance ?? {}, source: ownManual ? 'manual' : 'scene',
                 stale: true, textHash: input.textHash,
             }));
         } else {
@@ -3572,14 +3715,16 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         deps.onUpdate();
     }
 
-    // Observes every reply of the current run that is not up to date, oldest first (the scheduler
-    // runs them in order), and waits up to observeWaitMs for the last one.
-    async function ensureObserved(chat, before, current) {
-        if (current.stages.scene?.enabled === false) return;
+    // Observes every reply of the latest run that is not up to date, oldest first (the scheduler
+    // runs them in order), and waits up to observeWaitMs for the last one. Stopping the generation
+    // ends the wait at once; the observes finish in the background.
+    async function ensureObserved(chat, before, current, signal) {
+        if (current.stages.scene?.enabled === false || signal.aborted) return;
         const indices = catchUpIndices(chat, before, current);
         if (!indices.length) return;
         for (const index of indices) scheduler.start(index);
-        await scheduler.flush(indices.at(-1), current.observeWaitMs);
+        const stopped = new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+        await Promise.race([scheduler.flush(indices.at(-1), current.observeWaitMs), stopped]);
     }
 
     async function plan(coreChat, contextSize, rawType) {
@@ -3604,7 +3749,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         // A swipe replaces the last AI message, so its state must not feed the new reply.
         const before = type === 'swipe' && isAiMessage(chat[chat.length - 1]) ? chat.length - 1 : chat.length;
 
-        await ensureObserved(chat, before, current);
+        await ensureObserved(chat, before, current, controller.signal);
         const { state } = readState(chat, { before });
         const result = await runPhase(stages, {
             phase: 'plan',
@@ -4061,7 +4206,7 @@ import { registerCommands } from './src/commands.js';
 
 const suppression = new Set();
 const briefStore = { value: '' };
-const laya = createLayaScorer();
+const laya = createLayaScorer({ getServiceUrl: () => st.getSettings().stages.lore.serviceUrl });
 
 const stages = [
     createMemoryStage(),
@@ -5243,6 +5388,7 @@ The Stages list shows what is ready and what each stage needs.
 ## Using it
 
 - The **Scene** section shows the current state. Edit and save to correct it; your edit wins until new evidence changes it. "Where these came from" links each fact to the message it was quoted from.
+- If an extraction fails, the Scene section shows **Out of date** with a **Retry** button. It is not retried automatically; Retry, editing the message, or a new reply tries again.
 - The **Last turn** section shows what each stage did and how long it took, plus session timings.
 - `/conductor on|off|status`, `/scene`, `/scene set location=rooftop`, `/scene set present.Ellen.outfit=red coat`.
 - Put `{{conductor_brief}}` in your preset and set Brief placement to macro mode to place the notes yourself.
