@@ -72,8 +72,10 @@ helpers in order and hands the narrator a clean brief.
 v1 is worth keeping if all of these hold:
 
 1. **Scene extraction is accurate.** With the chosen helper model,
-   `tools/eval-scene.mjs` reports at least 90% field accuracy on the fixture
-   set, and the evidence gate accepts no change that lacks a real quote.
+   `tools/eval-scene.mjs` reports at least 90% change recall (expected changes
+   found) and at least 90% stability (unchanged fields left alone), with
+   errors counted as failures. A model that changes nothing scores 0% recall.
+   The evidence gate accepts no change that lacks a real quote.
 2. **Continuity improves.** Manual A/B on two cards the author plays: a
    50-turn session with sangkhem off and a 50-turn session with it on, counting
    continuity errors (wrong location, wrong outfit or condition, a character
@@ -186,7 +188,7 @@ What sangkhem does with each piece, and what the user has to change.
 | Piece | sangkhem | User action |
 |---|---|---|
 | Summaryception | **Reads** its store for the Memory stage. Never injects the summary itself, so nothing is doubled. | None. Keep it enabled. |
-| SnapCompact | **Leaves alone.** The summary is only injected by Summaryception, so SnapCompact still images it and the savings stay. The brief is ordinary text and is not imaged. | None. |
+| SnapCompact | **Leaves alone.** The summary is only injected by Summaryception, so SnapCompact still images it and the savings stay. The brief is ordinary text and is not imaged. Lore entries the Lore stage drops are disabled before ST's real scan, which is where SnapCompact gets the lore it images, so they never reappear as images. | None. |
 | Laya WI Director: lore pruning | **Replaces** it with the Lore stage. If the standalone director is on (`extension_settings.laya_wi_director.enabled`), the Lore stage turns itself off and the panel warns, so lore is never pruned twice. | Turn off "Enable" in Laya WI Director. |
 | Laya WI Director: reply guard | **Leaves alone.** It keeps working against the same service. | Keep `guardEnabled` as wanted. |
 | Laya service | **Uses** it (`/wi-director`, `/health`). The repo ships an identical copy. | Run either copy on `:8666`. |
@@ -215,7 +217,8 @@ Kept small so a small model can produce it reliably.
 
 - All string fields may be empty. `present` and `threads` may be empty arrays.
 - `threads` holds open plot threads and promises, capped at a configurable
-  length (default 8).
+  length (default 8). At the cap, a new thread is refused and shown in the
+  inspector as rejected ("over thread cap"); closing a thread makes room.
 - Fields can be switched off in settings; disabled fields are left out of the
   extraction prompt and the brief.
 
@@ -272,8 +275,13 @@ is told to respect, and the error would reinforce itself. Three defences:
    `evidence` map. Every field that differs from the previous state must have a
    quote in `evidence`, taken from the new user message or the reply. The
    validator checks each quote is really there (case- and
-   whitespace-insensitive substring match). A change without a verified quote
+   whitespace-insensitive substring match, after NFKC normalisation so
+   full-width punctuation matches its ASCII form). A quote must be specific:
+   at least two words, or at least three characters in scripts written
+   without spaces (Chinese, Japanese, Thai). A change without a verified quote
    is reverted to the previous value and listed in the inspector as rejected.
+   The gate proves the quote exists in the messages, not that it supports the
+   change.
    Unchanged fields need no quote, so the model cannot drift a field silently.
    Evidence keys are field paths: `location`, `time`, `present.<name>` (enters
    or leaves), `present.<name>.<attribute>`, and one quote per thread added or
@@ -305,7 +313,8 @@ The scene panel's manual edit is the final defence.
 A port of Laya WI Director's lore path into a stage.
 
 1. Dry-run World Info scan with ST's own matcher (`checkWorldInfo(chat, contextSize, true)`),
-   using the same chat preparation ST uses for the real scan.
+   using the same chat preparation ST uses for the real scan, including ST's
+   own "Include names" World Info setting.
 2. Constant entries are never judged. With **Protect cache prefix** on, entries
    placed before the chat history (anything not at an `@depth` position) are
    not judged either (see "Brief placement and caching").
@@ -314,7 +323,8 @@ A port of Laya WI Director's lore path into a stage.
    `recentTurns` messages, trimmed to fit Laya's 1024-token context.
 4. `score = wRelevance * relevance + wUsefulness * usefulness`. Entries are
    ranked and greedily filled into `budgetTokens`. Anything below `minScore` or
-   over budget is suppressed.
+   over budget is suppressed. Entries the scorer returned no score for are kept
+   and not charged to the budget, so they cannot crowd out scored entries.
 5. Suppression is applied in memory only, during the real scan, via
    `WORLDINFO_ENTRIES_LOADED`, and cleared on `GENERATION_ENDED` /
    `GENERATION_STOPPED`. Nothing is written to disk.
@@ -352,7 +362,9 @@ Open threads: owes {{user}} a favor; shark plushie still missing
   inside the configured story tags (default `content`) if present, otherwise
   the text outside custom XML tags, so CoT and notes are ignored.
 - Calls the configured connection profile with an extraction prompt asking for
-  `{ state, evidence }` as JSON.
+  `{ state, evidence }` as JSON, at the configured temperature (default 0) and
+  without the profile's sampler preset, so the eval tool measures the same
+  settings.
 - Output is parsed, validated against the schema (types, required keys,
   `threads` cap), then passed through the evidence gate.
 - On success the state and provenance are written to the message and the chat
@@ -377,11 +389,20 @@ Setting `observeTrigger`:
   swipes, but the scene panel lags one turn and extraction time is added before
   the narrator (counted in the Plan budget).
 
-In both modes, Plan checks the latest AI reply. If an Observe for it is running,
-Plan waits up to `observeWaitMs` (default 4000). If the reply has no state and
-nothing is running (commit mode, messages from before install, earlier failure),
-Plan observes it now, within the Plan budget. Otherwise Plan uses the last
-completed state.
+Observes run one at a time, in message order, so each reply's extraction
+builds on the state the previous reply's extraction wrote.
+
+In both modes, Plan looks at the AI replies since the last user message (up to
+4, stopping at one whose record is current). Any that are unobserved or out of
+date are observed now, oldest first, and Plan waits up to `observeWaitMs`
+(default 4000) for the last one. This covers group turns, commit mode, and the
+latest reply of a chat from before install. If the wait runs out, Plan uses the
+last completed state and the observes finish in the background.
+
+A manual edit cancels an observe in flight for that message, and an observe
+discards its result if the record changed while it ran, so hand edits are never
+overwritten. The scene panel's draft is tied to the chat and message it was
+opened for and is dropped or refused if either changes.
 
 ## Generation types
 
@@ -437,8 +458,12 @@ enabled.
 
 ## Latency
 
-- The Plan phase has a total budget (`planBudgetMs`, default 8000). When it
-  runs out, the remaining Plan stages are skipped and the narrator starts.
+- The Plan phase has a total budget (`planBudgetMs`, default 8000), which
+  includes the observe wait. When it runs out, the remaining Plan stages are
+  skipped and the narrator starts, except Brief: it is only string rendering
+  and is exempt from the budget, so the narrator always gets its scene notes.
+  A stage whose timeout the budget cut short is reported as skipped, not
+  failed, so the failure warning never blames it for time the wait used.
 - Every stage has its own timeout and receives the generation's abort signal.
 - A slow or dead Laya service makes the brief thinner (lore unpruned); it never
   holds up generation.

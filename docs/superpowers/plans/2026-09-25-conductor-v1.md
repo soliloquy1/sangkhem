@@ -16,8 +16,11 @@
 - Tests: `npm test` runs `node --test`. Node ≥ 20. No npm dependencies, ever.
 - Only `index.js`, `src/st.js`, `src/commands.js` and `src/ui/dom.js`, `src/ui/panel.js`, `src/ui/settingsForm.js`, `src/ui/scenePanel.js`, `src/ui/inspector.js` may reference `SillyTavern`, `document`, `window`, `toastr` or `jQuery`. Every other module must import cleanly in plain Node (enforced by `tests/imports.test.js`).
 - Names: module/settings key `sangkhem` (`extension_settings.sangkhem`); message record `message.extra.conductor`; extension prompt key `sangkhem`; macro `{{conductor_brief}}`; interceptor `globalThis.conductorInterceptor`; manifest `loading_order: 200`.
-- Defaults, verbatim from the spec: `planBudgetMs` 8000, `observeWaitMs` 4000, `settleMs` 1500, `failureToastAfter` 3, threads cap 8, brief depth 1, story tags `content`, Laya URL `http://localhost:8666`, `maxCandidates` 25, `budgetTokens` 1024, `recentTurns` 4, `wRelevance` 1.0, `wUsefulness` 1.0, `minScore` 1.0, `protectCachePrefix` false.
+- Defaults, verbatim from the spec: `planBudgetMs` 8000, `observeWaitMs` 4000, `settleMs` 1500, `failureToastAfter` 3, threads cap 8, brief depth 1, story tags `content`, Laya URL `http://localhost:8666`, `maxCandidates` 25, `budgetTokens` 1024, `recentTurns` 4, `wRelevance` 1.0, `wUsefulness` 1.0, `minScore` 1.0, `protectCachePrefix` false. Added in plan review: scene `temperature` 0, `CATCH_UP_LIMIT` 4.
 - Fail-open: nothing may throw out of the interceptor or an event handler. A failing stage is skipped; generation always proceeds.
+- The Brief stage is budget-exempt: running out of plan budget (for example waiting on scene tracking) must never cost the narrator its scene notes.
+- Manual scene edits always win over an extraction that was already running.
+- Toasts that include error text pass `{ escapeHtml: true }`.
 - Never put chat or model text into `innerHTML`. Build DOM with `h()` from `src/ui/dom.js` (textContent only).
 - Commit messages have no Co-Authored-By or other attribution trailer.
 - Code style: 4-space indent, single quotes, semicolons, ES modules, JSDoc on exported functions — same as SnapCompact.
@@ -26,7 +29,7 @@
 
 1. **Model output containing markup** (`"location": "<img src=x onerror=alert(1)>"`) must render as literal text in the scene panel and inspector. Pinned by the `h()` test in Task 14.
 2. **Group chats / consecutive AI messages** (two character replies with no user message between): Observe must read an empty user message, not an older one. Pinned in Task 3 (`previousUserIndex`) and Task 12 (`observeInput`).
-3. **Non-English replies** (Chinese, Japanese, corner-bracket quotes 「」, full-width punctuation) must pass the evidence gate when the quote is really there. Pinned in Task 4.
+3. **Non-English replies** (Chinese, Japanese, corner-bracket quotes 「」, full-width punctuation quoted back as ASCII, e.g. `走吧，她说` quoted as `走吧,她说`) must pass the evidence gate when the quote is really there. Pinned in Task 4.
 4. **Character names with dots or spaces** (`/scene set present.Dr. Kim.outfit=lab coat`) must parse to name `Dr. Kim`, attribute `outfit`. Pinned in Task 3.
 5. **Message deleted, swiped or chat switched while Observe is running**: the late result must be discarded, never written onto the wrong message or chat. Pinned in Task 12.
 
@@ -186,7 +189,8 @@ test('defaults match the spec', () => {
     );
     assert.deepEqual([brief.mode, brief.depth], ['auto', 1]);
     assert.ok(brief.template.includes('{{scene}}'));
-    assert.deepEqual([scene.profileId, scene.threadsCap, scene.storyTags], ['', 8, 'content']);
+    assert.deepEqual([scene.profileId, scene.threadsCap, scene.storyTags, scene.temperature], ['', 8, 'content', 0]);
+    assert.equal('includeNames' in lore, false);
     assert.deepEqual(scene.fields, { location: true, time: true, present: true, threads: true });
 });
 
@@ -243,7 +247,6 @@ export const DEFAULTS = {
             wUsefulness: 1,
             minScore: 1,
             protectCachePrefix: false,
-            includeNames: true,
         },
         brief: {
             enabled: true,
@@ -257,6 +260,7 @@ export const DEFAULTS = {
             profileId: '',
             timeoutMs: 20000,
             maxTokens: 800,
+            temperature: 0, // pinned so the eval tool measures the same settings as the extension
             threadsCap: 8,
             storyTags: 'content',
             fields: { location: true, time: true, present: true, threads: true },
@@ -306,7 +310,7 @@ export function setPath(obj, path, value) {
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `npm test`
-Expected: PASS, 6 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 6: Commit**
 
@@ -326,7 +330,7 @@ git commit -m "feat: scaffold extension and settings defaults"
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - Stage shape: `{ id: string, phase: 'plan'|'observe', available?(ctx, config) → true|string, run(turn, state, config) → Promise<StageResult|void> }`. `StageResult = { statePatch?: object, output?: any, skip?: string, summary?: string }`.
+  - Stage shape: `{ id: string, phase: 'plan'|'observe', budgetExempt?: boolean, available?(ctx, config) → true|string, run(turn, state, config) → Promise<StageResult|void> }`. A `budgetExempt` stage runs even after the phase budget is used up, with its own timeout. A timeout that the budget shortened is reported as `skipped` (`plan budget used up`), not `failed`. `StageResult = { statePatch?: object, output?: any, skip?: string, summary?: string }`.
   - `runPhase(stages, { phase, turn, state, settings, budgetMs = Infinity, now = Date.now }) → Promise<{ outputs, state, reports }>`. Each stage receives `{ ...turn, outputs, signal }` where `signal` aborts on timeout or on `turn.signal`. `reports[]` items: `{ id, status: 'ran'|'skipped'|'failed'|'off', ms, reason?, summary? }`.
   - `runWithTimeout(task: (signal) => Promise, ms, parentSignal?) → Promise`; `StageTimeoutError`, `StageAbortedError`.
   - `describeStage(stage, settings, ctx) → { id, status: 'off'|'ready'|'unavailable', reason? }`.
@@ -422,6 +426,23 @@ test('the phase budget skips remaining stages once used up', async () => {
     ], { phase: 'plan', turn: {}, state: {}, settings: settings(), budgetMs: 50, now });
     assert.deepEqual(result.reports.map((r) => r.status), ['ran', 'skipped']);
     assert.equal(result.reports[1].reason, 'plan budget used up');
+});
+
+test('a budget-exempt stage still runs after the budget is used up', async () => {
+    let clock = 0;
+    const result = await runPhase([
+        stage('a', async () => { clock += 100; }),
+        stage('brief', async () => ({ output: 'notes' }), { budgetExempt: true }),
+    ], { phase: 'plan', turn: {}, state: {}, settings: settings(), budgetMs: 50, now: () => clock });
+    assert.deepEqual(result.reports.map((r) => r.status), ['ran', 'ran']);
+    assert.equal(result.outputs.brief, 'notes');
+});
+
+test('a timeout cut short by the budget is a skip, not a failure', async () => {
+    const result = await runPhase([stage('lore', () => sleep(200))], {
+        phase: 'plan', turn: {}, state: {}, settings: settings({ lore: { timeoutMs: 5000 } }), budgetMs: 20,
+    });
+    assert.deepEqual([result.reports[0].status, result.reports[0].reason], ['skipped', 'plan budget used up']);
 });
 
 test('an aborted parent signal skips stages and does not count as failure', async () => {
@@ -578,6 +599,7 @@ export function describeStage(stage, settings, ctx) {
 
 /**
  * Runs every stage of one phase in order. Never throws: failures become reports.
+ * A stage with `budgetExempt: true` still runs after the budget is used up (cheap stages only).
  * @returns {Promise<{ outputs: object, state: object, reports: object[] }>}
  */
 export async function runPhase(stages, { phase, turn, state, settings, budgetMs = Infinity, now = Date.now }) {
@@ -597,7 +619,8 @@ export async function runPhase(stages, { phase, turn, state, settings, budgetMs 
             continue;
         }
         const remaining = budgetMs - (now() - started);
-        if (remaining <= 0) {
+        const exempt = stage.budgetExempt === true;
+        if (remaining <= 0 && !exempt) {
             skip('plan budget used up');
             continue;
         }
@@ -606,7 +629,10 @@ export async function runPhase(stages, { phase, turn, state, settings, budgetMs 
             skip(typeof available === 'string' ? available : 'unavailable');
             continue;
         }
-        const timeoutMs = Math.min(config.timeoutMs ?? DEFAULT_STAGE_TIMEOUT_MS, remaining);
+        const ownTimeout = config.timeoutMs ?? DEFAULT_STAGE_TIMEOUT_MS;
+        // A timeout shortened by the budget is the budget's fault, not the stage's: report a skip.
+        const clipped = !exempt && remaining < ownTimeout;
+        const timeoutMs = exempt ? ownTimeout : Math.min(ownTimeout, remaining);
         const t0 = now();
         try {
             const result = (await runWithTimeout(
@@ -624,6 +650,7 @@ export async function runPhase(stages, { phase, turn, state, settings, budgetMs 
             reports.push({ id: stage.id, status: 'ran', ms, summary: result.summary });
         } catch (error) {
             if (error instanceof StageAbortedError) skip('aborted', now() - t0);
+            else if (error instanceof StageTimeoutError && clipped) skip('plan budget used up', now() - t0);
             else reports.push({ id: stage.id, status: 'failed', ms: now() - t0, reason: error?.message ?? String(error) });
         }
     }
@@ -1042,7 +1069,7 @@ export function applyFieldEdit(state, path, value) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/state.test.js`
-Expected: PASS, 17 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1062,9 +1089,9 @@ git commit -m "feat: add scene state schema, lookup and per-swipe records"
 **Interfaces:**
 - Consumes: `PERSON_ATTRS` from `src/state.js`.
 - Produces:
-  - `MIN_QUOTE_CHARS = 3`, `normalize(text) → string`, `verifyQuote(quote, haystack) → boolean` (haystack already normalised).
+  - `MIN_WORDS = 2`, `MIN_UNSPACED_CHARS = 3`, `normalize(text) → string` (NFKC, straight quotes incl. 「」『』), `quoteIsSpecific(needle) → boolean` (two words, or three characters in Han/Kana/Thai), `quoteProblem(quote, haystack) → null | 'no quote' | 'quote too short' | 'quote not found in messages'`, `verifyQuote(quote, haystack) → boolean`. The gate proves a quote exists, not that it supports the change.
   - `diffPaths(prev, next) → string[]` field paths that differ.
-  - `applyEvidenceGate({ prev, next, evidence, sources, mesId, prevProvenance = {} }) → { state, provenance, accepted: string[], rejected: [{ path, reason }] }`. Provenance entries: `{ mesId, quote }`.
+  - `applyEvidenceGate({ prev, next, evidence, sources, mesId, prevProvenance = {}, threadsCap = Infinity }) → { state, provenance, accepted: string[], rejected: [{ path, reason }] }`. Provenance entries: `{ mesId, quote }`. New threads beyond `threadsCap` are refused with reason `over thread cap` (no provenance, not accepted); closures are applied first, so closing a thread makes room.
   - Field paths: `location`, `time`, `present.<Name>`, `present.<Name>.<attr>`, `threads.<thread text>`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1073,7 +1100,7 @@ git commit -m "feat: add scene state schema, lookup and per-swipe records"
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalize, verifyQuote, diffPaths, applyEvidenceGate } from '../src/evidence.js';
+import { normalize, verifyQuote, quoteProblem, diffPaths, applyEvidenceGate } from '../src/evidence.js';
 import { validateState } from '../src/state.js';
 
 const S = (raw) => validateState(raw, { threadsCap: 99 }).state;
@@ -1084,7 +1111,11 @@ const prev = S({
 });
 
 test('normalize lowercases, unifies quotes and whitespace, and drops markdown emphasis', () => {
-    assert.equal(normalize('  *She  SMILES*\n“hi” ‘x’ … '), 'she smiles "hi" \'x\' ...');
+    assert.equal(normalize('  *She  SMILES*\n“hi” ‘x’ … 「a」'), 'she smiles "hi" \'x\' ... "a"');
+});
+
+test('normalize maps full-width punctuation and letters to ASCII', () => {
+    assert.equal(normalize('走吧，她说！ＯＫ'), '走吧,她说!ok');
 });
 
 test('verifyQuote needs a real, long-enough substring', () => {
@@ -1092,15 +1123,27 @@ test('verifyQuote needs a real, long-enough substring', () => {
     assert.equal(verifyQuote('pulls on the red coat', hay), true);
     assert.equal(verifyQuote('"Ellen pulls on the red coat."', hay), true);
     assert.equal(verifyQuote('puts on a blue coat', hay), false);
-    assert.equal(verifyQuote('ok', hay), false);
     assert.equal(verifyQuote(null, hay), false);
+});
+
+test('single English words are too short to count as evidence', () => {
+    const hay = normalize('She smiles at the rooftop door.');
+    assert.equal(quoteProblem('the', hay), 'quote too short');
+    assert.equal(quoteProblem('rooftop', hay), 'quote too short');
+    assert.equal(quoteProblem('rooftop door', hay), null);
+    assert.equal(quoteProblem(undefined, hay), 'no quote');
 });
 
 test('verifyQuote works for CJK text and corner brackets', () => {
     const hay = normalize('艾伦穿上了红色外套。「走吧」她说。');
     assert.equal(verifyQuote('穿上了红色外套', hay), true);
-    assert.equal(verifyQuote('「走吧」', hay), true);
+    assert.equal(verifyQuote('「走吧」她说', hay), true);
     assert.equal(verifyQuote('穿上了蓝色外套', hay), false);
+    assert.equal(verifyQuote('走吧', hay), false);
+});
+
+test('a quote with ASCII punctuation matches full-width punctuation in the reply', () => {
+    assert.equal(verifyQuote('走吧,她说', normalize('「走吧，她说。」')), true);
 });
 
 test('diffPaths lists every changed path', () => {
@@ -1198,6 +1241,27 @@ test('threads opened and closed are each gated', () => {
     assert.deepEqual(gate.rejected, [{ path: 'threads.find the key', reason: 'no quote' }]);
 });
 
+test('new threads over the cap are refused visibly, without provenance', () => {
+    const next = S({ ...prev, threads: ['owes a favor', 'plushie missing', 'meet at dawn'] });
+    const gate = applyEvidenceGate({
+        prev, next, sources: ['"Meet me at dawn."'], mesId: 8, threadsCap: 2,
+        evidence: { 'threads.meet at dawn': 'Meet me at dawn' },
+    });
+    assert.deepEqual(gate.state.threads, ['owes a favor', 'plushie missing']);
+    assert.deepEqual(gate.rejected, [{ path: 'threads.meet at dawn', reason: 'over thread cap' }]);
+    assert.deepEqual(gate.accepted, []);
+    assert.equal('threads.meet at dawn' in gate.provenance, false);
+});
+
+test('closing a thread makes room under the cap', () => {
+    const next = S({ ...prev, threads: ['owes a favor', 'meet at dawn'] });
+    const gate = applyEvidenceGate({
+        prev, next, sources: ['She finds the plushie. "Meet me at dawn."'], mesId: 8, threadsCap: 2,
+        evidence: { 'threads.plushie missing': 'finds the plushie', 'threads.meet at dawn': 'Meet me at dawn' },
+    });
+    assert.deepEqual(gate.state.threads, ['owes a favor', 'meet at dawn']);
+});
+
 test('evidence keys match case-insensitively', () => {
     const next = S({ ...prev, location: 'rooftop' });
     const gate = applyEvidenceGate({ prev, next, evidence: { LOCATION: 'on the rooftop' }, sources: ['on the rooftop'], mesId: 1 });
@@ -1222,26 +1286,45 @@ Expected: FAIL, `src/evidence.js` not found.
 ```js
 import { PERSON_ATTRS } from './state.js';
 
-export const MIN_QUOTE_CHARS = 3;
+// A quote must be specific enough to point at one change: two words in space-separated text,
+// three characters in scripts written without spaces (Chinese, Japanese, Thai).
+export const MIN_WORDS = 2;
+export const MIN_UNSPACED_CHARS = 3;
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}]/u;
 
-/** Lowercase, straight quotes, single spaces, no markdown emphasis characters. */
+/**
+ * NFKC (full-width punctuation and letters become ASCII, … becomes ...), lowercase, straight quotes
+ * (curly quotes and CJK corner brackets), single spaces, no markdown emphasis characters.
+ */
 export function normalize(text) {
     return String(text ?? '')
+        .normalize('NFKC')
         .toLowerCase()
         .replace(/[‘’‚‛]/g, "'")
-        .replace(/[“”„‟]/g, '"')
-        .replace(/…/g, '...')
+        .replace(/[“”„‟「」『』]/g, '"')
         .replace(/[*_]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
 }
 
-/** True when the quote, minus wrapping quote marks, appears in the (normalised) haystack. */
-export function verifyQuote(quote, haystack) {
-    if (typeof quote !== 'string') return false;
-    const needle = normalize(quote).replace(/^["']+|["']+$/g, '').trim();
-    return needle.length >= MIN_QUOTE_CHARS && haystack.includes(needle);
+export function quoteIsSpecific(needle) {
+    if (UNSPACED.test(needle)) return [...needle].length >= MIN_UNSPACED_CHARS;
+    return needle.split(' ').filter(Boolean).length >= MIN_WORDS;
 }
+
+/**
+ * null when the quote (minus wrapping quote marks) is specific and appears in the normalised
+ * haystack; otherwise why it does not count. This proves the quote exists in the messages,
+ * not that it supports the change.
+ */
+export function quoteProblem(quote, haystack) {
+    if (typeof quote !== 'string') return 'no quote';
+    const needle = normalize(quote).replace(/^["']+|["']+$/g, '').trim();
+    if (!quoteIsSpecific(needle)) return 'quote too short';
+    return haystack.includes(needle) ? null : 'quote not found in messages';
+}
+
+export const verifyQuote = (quote, haystack) => quoteProblem(quote, haystack) === null;
 
 const personKey = (name) => name.trim().toLowerCase();
 const same = (a, b) => normalize(a) === normalize(b);
@@ -1283,21 +1366,23 @@ function dropProvenance(provenance, prefix) {
 
 /**
  * Keeps only the changes backed by a quote that really appears in the new messages.
- * Unchanged fields need no quote. Rejected changes keep the previous value.
+ * Unchanged fields need no quote. Rejected changes keep the previous value. New threads beyond
+ * threadsCap are refused (reported as "over thread cap"); closing old threads makes room.
  */
-export function applyEvidenceGate({ prev, next, evidence, sources, mesId, prevProvenance = {} }) {
+export function applyEvidenceGate({ prev, next, evidence, sources, mesId, prevProvenance = {}, threadsCap = Infinity }) {
     const haystack = normalize(sources.filter(Boolean).join('\n'));
     const accepted = [];
     const rejected = [];
     const provenance = { ...prevProvenance };
     const allow = (path) => {
         const quote = findQuote(evidence, path);
-        if (verifyQuote(quote, haystack)) {
+        const problem = quoteProblem(quote, haystack);
+        if (problem === null) {
             accepted.push(path);
             provenance[path] = { mesId, quote: quote.trim() };
             return true;
         }
-        rejected.push({ path, reason: quote == null ? 'no quote' : 'quote not found in messages' });
+        rejected.push({ path, reason: problem });
         return false;
     };
 
@@ -1339,7 +1424,12 @@ export function applyEvidenceGate({ prev, next, evidence, sources, mesId, prevPr
     });
     const prevThreads = new Set(prev.threads.map(normalize));
     for (const thread of next.threads) {
-        if (!prevThreads.has(normalize(thread)) && allow(`threads.${thread}`)) state.threads.push(thread);
+        if (prevThreads.has(normalize(thread))) continue;
+        if (state.threads.length >= threadsCap) {
+            rejected.push({ path: `threads.${thread}`, reason: 'over thread cap' });
+            continue;
+        }
+        if (allow(`threads.${thread}`)) state.threads.push(thread);
     }
 
     return { state, provenance, accepted, rejected };
@@ -1349,7 +1439,7 @@ export function applyEvidenceGate({ prev, next, evidence, sources, mesId, prevPr
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/evidence.test.js`
-Expected: PASS, 12 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1370,7 +1460,7 @@ git commit -m "feat: gate scene changes on verified quotes with provenance"
 - Produces:
   - `extractStory(text, storyTags = ['content']) → string`, `parseTagList(value) → string[]`.
   - `parseJsonReply(text) → any` (throws `Error` with a readable message).
-  - `createLlm(sendRequest) → { complete(profileId, messages, { maxTokens = 800, signal }) → Promise<string> }` where `sendRequest(profileId, messages, maxTokens, signal) → Promise<string | { content: string }>`.
+  - `createLlm(sendRequest) → { complete(profileId, messages, { maxTokens = 800, temperature, signal }) → Promise<string> }` where `sendRequest(profileId, messages, { maxTokens, temperature, signal }) → Promise<string | { content: string }>`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1431,8 +1521,8 @@ test('createLlm returns content from string or extracted-data replies', async ()
     const calls = [];
     const llm = createLlm(async (...args) => { calls.push(args); return { content: 'hi', reasoning: 'x' }; });
     const signal = new AbortController().signal;
-    assert.equal(await llm.complete('p1', [{ role: 'user', content: 'q' }], { maxTokens: 50, signal }), 'hi');
-    assert.deepEqual(calls[0], ['p1', [{ role: 'user', content: 'q' }], 50, signal]);
+    assert.equal(await llm.complete('p1', [{ role: 'user', content: 'q' }], { maxTokens: 50, temperature: 0, signal }), 'hi');
+    assert.deepEqual(calls[0], ['p1', [{ role: 'user', content: 'q' }], { maxTokens: 50, temperature: 0, signal }]);
     assert.equal(await createLlm(async () => 'plain').complete('p', []), 'plain');
 });
 
@@ -1528,12 +1618,12 @@ export function parseJsonReply(text) {
 }
 
 /**
- * @param {(profileId: string, messages: object[], maxTokens: number, signal?: AbortSignal) => Promise<any>} sendRequest
+ * @param {(profileId: string, messages: object[], options: { maxTokens: number, temperature?: number, signal?: AbortSignal }) => Promise<any>} sendRequest
  */
 export function createLlm(sendRequest) {
     return {
-        async complete(profileId, messages, { maxTokens = 800, signal } = {}) {
-            const result = await sendRequest(profileId, messages, maxTokens, signal);
+        async complete(profileId, messages, { maxTokens = 800, temperature, signal } = {}) {
+            const result = await sendRequest(profileId, messages, { maxTokens, temperature, signal });
             const text = typeof result === 'string' ? result : result?.content;
             if (typeof text !== 'string' || !text.trim()) throw new Error('empty reply from connection profile');
             return text;
@@ -1545,7 +1635,7 @@ export function createLlm(sendRequest) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test tests/story.test.js tests/llm.test.js`
-Expected: PASS, 10 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1566,7 +1656,7 @@ git commit -m "feat: add story-text extraction and LLM reply helpers"
 - Consumes: `PERSON_ATTRS` (`src/state.js`), `DEFAULT_BRIEF_TEMPLATE` (`src/settings.js`).
 - Produces:
   - `renderSceneLines(state, fields = {}) → string[]`, `renderSceneLine(state, fields) → string` (lines joined with ` | `), `renderBrief(state, { template, fields }) → string` (`''` when state is empty).
-  - `createBriefStage({ briefStore: { value: string }, setPrompt: (text, depth) => void }) → Stage` (id `brief`, phase `plan`). Output `{ brief }`. In `auto` mode it calls `setPrompt(brief, depth)`; in `macro` mode `setPrompt('', depth)`. Always sets `briefStore.value`. Reads scene field toggles from `turn.settings.stages.scene.fields`.
+  - `createBriefStage({ briefStore: { value: string }, setPrompt: (text, depth) => void }) → Stage` (id `brief`, phase `plan`, `budgetExempt: true`). Output `{ brief }`. In `auto` mode it calls `setPrompt(brief, depth)`; in `macro` mode `setPrompt('', depth)`. Always sets `briefStore.value`. Reads scene field toggles from `turn.settings.stages.scene.fields`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1626,6 +1716,7 @@ test('stage injects in auto mode and clears the prompt in macro mode', async () 
     assert.equal(calls[0][0], briefStore.value);
     assert.equal(auto.output.brief, briefStore.value);
     assert.match(auto.summary, /4 lines, auto/);
+    assert.equal(stage.budgetExempt, true);
 
     await stage.run(turn, state, { mode: 'macro', depth: 2, template: '' });
     assert.deepEqual(calls[1], ['', 2]);
@@ -1690,6 +1781,8 @@ export function createBriefStage({ briefStore, setPrompt }) {
     return {
         id: 'brief',
         phase: 'plan',
+        // Only string rendering: it must still run when the observe wait used up the plan budget.
+        budgetExempt: true,
         async run(turn, state, config) {
             const fields = turn.settings?.stages?.scene?.fields;
             const brief = renderBrief(state, { template: config.template, fields });
@@ -1705,7 +1798,7 @@ export function createBriefStage({ briefStore, setPrompt }) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/brief.test.js`
-Expected: PASS, 7 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1726,7 +1819,7 @@ git commit -m "feat: add brief stage rendering and injection"
 - Consumes: `validateState`, `FIELDS` (`src/state.js`); `applyEvidenceGate` (`src/evidence.js`); `parseJsonReply` (`src/llm.js`); an `llm` from `createLlm`.
 - Produces:
   - `enabledFields(fields) → string[]`, `projectState(state, fields) → object`, `buildScenePrompt({ prev, userText, replyText, userName, charName, fields, threadsCap }) → [{ role: 'system', content }, { role: 'user', content }]`.
-  - `createSceneStage({ llm }) → Stage` (id `scene`, phase `observe`). Expects `turn = { mesId, userText, replyText, userName, charName, prevProvenance, signal }`. Returns `{ statePatch: fullNewState, output: { provenance, accepted, rejected, warnings }, summary }`. Unavailable reason when `config.profileId` is empty: `'choose a connection profile for scene tracking'`.
+  - `createSceneStage({ llm }) → Stage` (id `scene`, phase `observe`). Sends `config.temperature`. Validates the model's state with `threadsCap: Infinity` and applies the cap once, in the gate. Expects `turn = { mesId, userText, replyText, userName, charName, prevProvenance, signal }`. Returns `{ statePatch: fullNewState, output: { provenance, accepted, rejected, warnings }, summary }`. Unavailable reason when `config.profileId` is empty: `'choose a connection profile for scene tracking'`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1738,7 +1831,7 @@ import { buildScenePrompt, createSceneStage, enabledFields, projectState } from 
 import { validateState } from '../src/state.js';
 
 const prev = validateState({ location: 'kitchen', time: 'night', present: [{ name: 'Ellen', outfit: 'hoodie' }], threads: ['owes a favor'] }).state;
-const config = { profileId: 'p1', maxTokens: 600, threadsCap: 8, fields: { location: true, time: true, present: true, threads: true } };
+const config = { profileId: 'p1', maxTokens: 600, temperature: 0, threadsCap: 8, fields: { location: true, time: true, present: true, threads: true } };
 const turn = (extra = {}) => ({
     mesId: 12, userText: 'I grab my jacket and we head up to the roof.',
     replyText: 'Ellen follows you onto the rooftop, pulling on her red coat.',
@@ -1794,7 +1887,7 @@ test('accepts evidenced changes and rejects the rest', async () => {
     assert.deepEqual(result.output.provenance.location, { mesId: 12, quote: 'onto the rooftop' });
     assert.equal(result.summary, '2 change(s) accepted, 1 rejected');
     assert.equal(llm.calls[0][0], 'p1');
-    assert.deepEqual(llm.calls[0][2], { maxTokens: 600, signal: t.signal });
+    assert.deepEqual(llm.calls[0][2], { maxTokens: 600, temperature: 0, signal: t.signal });
 });
 
 test('accepts a state returned without the wrapper object', async () => {
@@ -1815,12 +1908,13 @@ test('disabled fields keep the previous value whatever the model says', async ()
     assert.deepEqual(result.statePatch.threads, ['owes a favor']);
 });
 
-test('threads are capped after the gate', async () => {
-    // "b" is closed without a quote (so it stays) and "roof trip" is added with one: three threads, cap 2.
+test('a new thread over the cap is refused and reported', async () => {
     const full = validateState({ ...prev, threads: ['a', 'b'] }).state;
-    const llm = fakeLlm(JSON.stringify({ state: { ...full, threads: ['a', 'roof trip'] }, evidence: { 'threads.roof trip': 'head up to the roof' } }));
+    const llm = fakeLlm(JSON.stringify({ state: { ...full, threads: ['a', 'b', 'roof trip'] }, evidence: { 'threads.roof trip': 'head up to the roof' } }));
     const result = await createSceneStage({ llm }).run(turn(), full, { ...config, threadsCap: 2 });
     assert.deepEqual(result.statePatch.threads, ['a', 'b']);
+    assert.deepEqual(result.output.rejected, [{ path: 'threads.roof trip', reason: 'over thread cap' }]);
+    assert.equal('threads.roof trip' in result.output.provenance, false);
 });
 
 test('skips replies with no story text', async () => {
@@ -1917,17 +2011,19 @@ export function createSceneStage({ llm }) {
                 prev: state, userText: turn.userText, replyText: turn.replyText,
                 userName: turn.userName, charName: turn.charName, fields: config.fields, threadsCap: config.threadsCap,
             });
-            const text = await llm.complete(config.profileId, messages, { maxTokens: config.maxTokens, signal: turn.signal });
+            const text = await llm.complete(config.profileId, messages, {
+                maxTokens: config.maxTokens, temperature: config.temperature, signal: turn.signal,
+            });
             const parsed = parseJsonReply(text);
             const rawState = parsed && typeof parsed.state === 'object' ? parsed.state : parsed;
-            const checked = validateState(rawState, { threadsCap: config.threadsCap });
+            // The thread cap is applied once, in the gate, so refusals are visible.
+            const checked = validateState(rawState, { threadsCap: Infinity });
             if (!checked.ok) throw new Error(`invalid scene state: ${checked.error}`);
             const next = keepDisabledFields(checked.state, state, config.fields);
             const gate = applyEvidenceGate({
                 prev: state, next, evidence: parsed?.evidence, sources: [turn.userText, turn.replyText],
-                mesId: turn.mesId, prevProvenance: turn.prevProvenance ?? {},
+                mesId: turn.mesId, prevProvenance: turn.prevProvenance ?? {}, threadsCap: config.threadsCap,
             });
-            gate.state.threads = gate.state.threads.slice(0, config.threadsCap);
             return {
                 statePatch: gate.state,
                 output: { provenance: gate.provenance, accepted: gate.accepted, rejected: gate.rejected, warnings: checked.warnings },
@@ -1941,7 +2037,7 @@ export function createSceneStage({ llm }) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/scene.test.js`
-Expected: PASS, 10 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -2139,7 +2235,7 @@ export function createMemoryStage({ backends = MEMORY_BACKENDS } = {}) {
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `node --test tests/memory.test.js`
-Expected: PASS, 8 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 6: Commit**
 
@@ -2160,10 +2256,10 @@ git commit -m "feat: add memory stage with Summaryception and none backends"
 - Consumes: `resolveBackend`, `BackendUnavailableError` (`src/backends/resolve.js`); `renderSceneLine` (`src/stages/brief.js`).
 - Produces:
   - Scorer shape: `{ id, label, available(ctx) → true|string, score(candidates: [{ id, content }], context: { message, recent }, { serviceUrl, signal }) → Promise<[{ id, relevance, usefulness }]> }`.
-  - `createLayaScorer({ fetchImpl = fetch, now = Date.now }) → scorer & { health(serviceUrl) → Promise<boolean> }`; `DOWN_RETRY_MS = 60000`. Network errors mark the service down for `DOWN_RETRY_MS` and throw `BackendUnavailableError`.
+  - `createLayaScorer({ fetchImpl = fetch, now = Date.now }) → scorer & { health(serviceUrl) → Promise<boolean> }` (health times out after `HEALTH_TIMEOUT_MS = 3000`); `DOWN_RETRY_MS = 60000`. Network errors mark the service down for `DOWN_RETRY_MS` and throw `BackendUnavailableError`.
   - `noneScorer`.
-  - Lore helpers: `AT_DEPTH_POSITION = 4`, `MAX_ENTRY_CHARS = 1600`, `SCORER_CONTEXT_CHARS = 1600`, `MESSAGE_CHARS = 600`, `SUMMARY_CHARS = 400`, `entryId(entry) → '<world>.<uid>'`, `selectCandidates(activated, { maxCandidates, protectCachePrefix }) → { pool, total }`, `rankAndFill(pool, scores, config, tokensOf) → { kept, dropped }` (items `{ entry, id, score, tokens, why? }`), `buildScorerContext({ chatForWI, recentTurns, sceneText, summary }) → { message, recent }`, `applySuppression(data, suppression) → number`, `layaDirectorConflict(ctx) → boolean`.
-  - `createLoreStage({ scorers, scanWorldInfo, countTokens, suppression }) → Stage` (id `lore`, phase `plan`). `scanWorldInfo(chatForWI, contextSize) → Promise<entry[]>`, `countTokens(text) → Promise<number>`, `suppression: Set<string>`. Output `{ kept, dropped, droppedTokens, judged, unjudged }`. Plan turn needs `chat` (ST's interceptor chat, oldest first), `contextSize`, `outputs.memory`.
+  - Lore helpers: `AT_DEPTH_POSITION = 4`, `MAX_ENTRY_CHARS = 1600`, `SCORER_CONTEXT_CHARS = 1600`, `MESSAGE_CHARS = 600`, `SUMMARY_CHARS = 400`, `entryId(entry) → '<world>.<uid>'`, `selectCandidates(activated, { maxCandidates, protectCachePrefix }) → { pool, total }`, `rankAndFill(pool, scores, config, tokensOf) → { kept, dropped }` (items `{ entry, id, score, tokens, why?, unscored? }`; entries with no score are kept and not charged to `budgetTokens`), `buildScorerContext({ chatForWI, recentTurns, sceneText, summary }) → { message, recent }`, `applySuppression(data, suppression) → number`, `layaDirectorConflict(ctx) → boolean`.
+  - `createLoreStage({ scorers, scanWorldInfo, countTokens, suppression, includeNames }) → Stage` (id `lore`, phase `plan`). `scanWorldInfo(chatForWI, contextSize) → Promise<entry[]>`, `countTokens(text) → Promise<number>`, `suppression: Set<string>`, `includeNames() → Promise<boolean>` (ST's own `world_info_include_names`, so the dry run matches the real scan). Output `{ kept, dropped, droppedTokens, judged, unjudged }`. Plan turn needs `chat` (ST's interceptor chat, oldest first), `contextSize`, `outputs.memory`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2208,6 +2304,15 @@ test('an aborted request does not mark the service down', async () => {
     assert.equal(scorer.available(), true);
 });
 
+test('health gives up on a host that never answers', async () => {
+    const scorer = createLayaScorer({ fetchImpl: (_url, init) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+    }) });
+    const started = Date.now();
+    assert.equal(await scorer.health('http://10.255.255.1'), false);
+    assert.ok(Date.now() - started < 3500);
+});
+
 test('health checks /health and clears the down state', async () => {
     let up = false;
     const scorer = createLayaScorer({ fetchImpl: async (url) => { if (!up) throw new TypeError('down'); assert.equal(url, 'http://x/health'); return ok({ status: 'ok' }); } });
@@ -2233,7 +2338,7 @@ import { BackendUnavailableError } from '../src/backends/resolve.js';
 import { validateState } from '../src/state.js';
 
 const entry = (uid, extra = {}) => ({ world: 'w', uid, content: `lore ${uid}`, position: 4, ...extra });
-const config = { backend: 'fake', maxCandidates: 25, budgetTokens: 1024, recentTurns: 4, wRelevance: 1, wUsefulness: 1, minScore: 1, protectCachePrefix: false, includeNames: true, serviceUrl: 'http://x' };
+const config = { backend: 'fake', maxCandidates: 25, budgetTokens: 1024, recentTurns: 4, wRelevance: 1, wUsefulness: 1, minScore: 1, protectCachePrefix: false, serviceUrl: 'http://x' };
 
 test('selectCandidates skips constant, disabled and empty entries and caps the pool', () => {
     const activated = [entry(1, { constant: true }), entry(2, { disable: true }), entry(3, { content: ' ' }), entry(4), entry(5), entry(6)];
@@ -2254,10 +2359,10 @@ test('rankAndFill ranks, applies the floor and fills the budget', () => {
         { id: 'w.2', relevance: 0, usefulness: 0.5 },
         { id: 'w.3', relevance: 3, usefulness: 3 },
     ];
-    const tokens = { 1: 600, 2: 10, 3: 500, 4: 300 };
+    const tokens = { 1: 1000, 2: 10, 3: 500, 4: 300 };
     const { kept, dropped } = rankAndFill(pool, scores, config, (e) => tokens[e.uid]);
-    // w.4 is unscored, so it ranks first (Infinity) and is kept.
-    assert.deepEqual(kept.map((k) => k.id), ['w.4', 'w.1']);
+    // w.4 is unscored: kept but not charged, so w.1 (1000 tokens) still fits the 1024 budget.
+    assert.deepEqual(kept.map((k) => [k.id, Boolean(k.unscored)]), [['w.4', true], ['w.1', false]]);
     assert.deepEqual(dropped.map((d) => [d.id, d.why]), [['w.3', 'over budget'], ['w.2', 'low score']]);
 });
 
@@ -2290,7 +2395,7 @@ test('layaDirectorConflict only when the standalone director is enabled and load
     assert.equal(layaDirectorConflict({ extensionSettings: {} }), false);
 });
 
-function makeStage({ scores = [], scoreError = null, activated = [entry(1), entry(2), entry(3)] } = {}) {
+function makeStage({ scores = [], scoreError = null, activated = [entry(1), entry(2), entry(3)], names = true } = {}) {
     const suppression = new Set();
     const seen = {};
     const fake = {
@@ -2302,6 +2407,7 @@ function makeStage({ scores = [], scoreError = null, activated = [entry(1), entr
         scanWorldInfo: async (chatForWI, contextSize) => { seen.scan = [chatForWI, contextSize]; return activated; },
         countTokens: async (text) => text.length,
         suppression,
+        includeNames: async () => names,
     });
     return { stage, suppression, seen };
 }
@@ -2326,6 +2432,12 @@ test('stage scores candidates, suppresses dropped entries and reports', async ()
     assert.deepEqual([...suppression], ['w.2']);
     assert.deepEqual(result.output, { kept: 2, dropped: 1, droppedTokens: 6, judged: 3, unjudged: 0 });
     assert.equal(result.summary, 'kept 2, dropped 1, ~6 tokens saved');
+});
+
+test('the dry-run scan follows ST\'s include-names setting', async () => {
+    const { stage, seen } = makeStage({ names: false });
+    await stage.run(turn(), state, config);
+    assert.deepEqual(seen.scan[0], ['hi there', 'hello']);
 });
 
 test('stage skips when one or no entries matched', async () => {
@@ -2374,6 +2486,7 @@ import { BackendUnavailableError } from '../resolve.js';
 
 // How long to treat the service as down after a connection error before trying again.
 export const DOWN_RETRY_MS = 60000;
+export const HEALTH_TIMEOUT_MS = 3000;
 
 const trimUrl = (url) => String(url ?? '').replace(/\/+$/, '');
 
@@ -2410,7 +2523,7 @@ export function createLayaScorer({ fetchImpl = (...args) => globalThis.fetch(...
         },
         async health(serviceUrl) {
             try {
-                const response = await fetchImpl(`${trimUrl(serviceUrl)}/health`);
+                const response = await fetchImpl(`${trimUrl(serviceUrl)}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
                 if (response.ok) downUntil = 0;
                 return response.ok;
             } catch {
@@ -2452,7 +2565,10 @@ export function selectCandidates(activated, { maxCandidates, protectCachePrefix 
     return { pool: judgeable.slice(0, maxCandidates), total: judgeable.length };
 }
 
-/** Ranks by weighted score (unscored entries rank first) and greedily fills the token budget. */
+/**
+ * Ranks by weighted score and greedily fills the token budget. Entries the scorer returned no
+ * score for are kept without being charged to the budget, so they cannot crowd out scored ones.
+ */
 export function rankAndFill(pool, scores, { wRelevance, wUsefulness, minScore, budgetTokens }, tokensOf) {
     const scoreById = new Map(scores.map((s) => [s.id, wRelevance * s.relevance + wUsefulness * s.usefulness]));
     const ranked = pool
@@ -2463,7 +2579,9 @@ export function rankAndFill(pool, scores, { wRelevance, wUsefulness, minScore, b
     const dropped = [];
     for (const item of ranked) {
         const tokens = tokensOf(item.entry);
-        if (item.score < minScore) {
+        if (item.score === Infinity) {
+            kept.push({ ...item, tokens, unscored: true });
+        } else if (item.score < minScore) {
             dropped.push({ ...item, tokens, why: 'low score' });
         } else if (tokens > budget) {
             dropped.push({ ...item, tokens, why: 'over budget' });
@@ -2514,7 +2632,11 @@ export function layaDirectorConflict(ctx) {
     return !(ctx.disabledExtensions ?? []).some((name) => /laya-wi-director$/i.test(name));
 }
 
-export function createLoreStage({ scorers, scanWorldInfo, countTokens, suppression }) {
+/**
+ * @param {{ scorers: object, scanWorldInfo: Function, countTokens: Function, suppression: Set<string>,
+ *   includeNames: () => Promise<boolean> }} deps  includeNames reads ST's own World Info setting.
+ */
+export function createLoreStage({ scorers, scanWorldInfo, countTokens, suppression, includeNames }) {
     return {
         id: 'lore',
         phase: 'plan',
@@ -2527,8 +2649,9 @@ export function createLoreStage({ scorers, scanWorldInfo, countTokens, suppressi
             const { backend: scorer, reason } = resolveBackend(scorers, config.backend, turn.ctx);
             if (scorer.id === 'none') return { skip: reason ?? 'lore scorer is set to none' };
 
-            // Same text ST scans with (script.js), newest first.
-            const chatForWI = turn.chat.map((m) => (config.includeNames ? `${m.name}: ${m.mes}` : m.mes)).reverse();
+            // Same text ST's real scan uses (script.js), newest first, so the dry run matches it.
+            const withNames = await includeNames();
+            const chatForWI = turn.chat.map((m) => (withNames ? `${m.name}: ${m.mes}` : m.mes)).reverse();
             const activated = await scanWorldInfo(chatForWI, turn.contextSize);
             const { pool, total } = selectCandidates(activated, config);
             if (pool.length <= 1) return { skip: `${pool.length} ${pool.length === 1 ? 'entry' : 'entries'} to judge` };
@@ -2566,7 +2689,7 @@ export function createLoreStage({ scorers, scanWorldInfo, countTokens, suppressi
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test tests/laya.test.js tests/lore.test.js`
-Expected: PASS, 17 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -2584,11 +2707,11 @@ git commit -m "feat: add lore stage with Laya scorer and in-memory suppression"
 - Test: `tests/observe.test.js`
 
 **Interfaces:**
-- Produces: `class ObserveScheduler({ run: (mesId, signal) => Promise, onError?: (error, mesId) => void })` with:
+- Produces: `class ObserveScheduler({ run: (mesId, signal) => Promise, onError?: (error, mesId) => void })`. Runs one job at a time, in start order (a queued job cancelled before its turn never runs). Methods:
   - `schedule(mesId, delayMs)`: (re)start the settle timer; aborts a run already in progress for that message (its text changed).
   - `start(mesId) → Promise`: run now (or return the running promise).
   - `cancel(mesId)`, `cancelAll()`, `isPending(mesId) → boolean` (waiting or running).
-  - `flush(mesId, waitMs) → Promise<boolean>`: start a waiting job now and wait for it up to `waitMs`; `true` if it finished (or nothing was pending).
+  - `flush(mesId, waitMs) → Promise<boolean>`: start a waiting job now and wait for it (and everything queued before it) up to `waitMs`; `true` if it finished (or nothing was pending).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2631,10 +2754,29 @@ test('rescheduling while running aborts the run and starts again', async () => {
     await sleep(5);
     scheduler.schedule(1, 5);
     assert.equal(runs[0].signal.aborted, true);
-    await sleep(60);
+    await sleep(100);
     assert.equal(runs.length, 2);
     assert.equal(runs[1].signal.aborted, false);
     assert.equal(scheduler.isPending(1), false);
+});
+
+test('runs one at a time, in start order', async () => {
+    const order = [];
+    const scheduler = new ObserveScheduler({ run: async (mesId) => { order.push(`start ${mesId}`); await sleep(15); order.push(`end ${mesId}`); } });
+    scheduler.start(1);
+    scheduler.start(2);
+    assert.equal(await scheduler.flush(2, 200), true);
+    assert.deepEqual(order, ['start 1', 'end 1', 'start 2', 'end 2']);
+});
+
+test('a queued job cancelled before its turn never runs', async () => {
+    const { runs, run } = recorder({ delay: 20 });
+    const scheduler = new ObserveScheduler({ run });
+    scheduler.start(1);
+    scheduler.start(2);
+    scheduler.cancel(2);
+    await sleep(50);
+    assert.deepEqual(runs.map((r) => r.mesId), [1]);
 });
 
 test('cancel stops a waiting job and aborts a running one', async () => {
@@ -2701,6 +2843,8 @@ Expected: FAIL, module not found.
 /**
  * Runs Observe once per message after its text settles. A new event for the same message restarts
  * the timer, and aborts a run in progress because the text it read is out of date.
+ * Runs happen one at a time, in the order they start, so each reply's observe builds on the state
+ * the previous reply's observe wrote (group chats, catch-up).
  */
 export class ObserveScheduler {
     constructor({ run, onError = () => {} }) {
@@ -2708,6 +2852,7 @@ export class ObserveScheduler {
         this.onError = onError;
         /** @type {Map<number, { timer: any, controller: AbortController|null, promise: Promise|null }>} */
         this.jobs = new Map();
+        this.tail = Promise.resolve();
     }
 
     schedule(mesId, delayMs) {
@@ -2733,14 +2878,15 @@ export class ObserveScheduler {
         if (job.promise) return job.promise;
         const controller = new AbortController();
         job.controller = controller;
-        job.promise = Promise.resolve()
-            .then(() => this.run(mesId, controller.signal))
+        job.promise = this.tail
+            .then(() => (controller.signal.aborted ? undefined : this.run(mesId, controller.signal)))
             .catch((error) => {
                 if (!controller.signal.aborted) this.onError(error, mesId);
             })
             .finally(() => {
                 if (this.jobs.get(mesId) === job && job.controller === controller) this.jobs.delete(mesId);
             });
+        this.tail = job.promise;
         return job.promise;
     }
 
@@ -2776,7 +2922,7 @@ export class ObserveScheduler {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/observe.test.js`
-Expected: PASS, 7 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -2898,7 +3044,7 @@ export function summarizeStats(stats) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/stats.test.js`
-Expected: PASS, 4 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -2919,9 +3065,10 @@ git commit -m "feat: add session timing and token stats"
 - Consumes: `runPhase`, `FailureTracker` (Task 2); state helpers (Task 3); `diffPaths` (Task 4); `extractStory`, `parseTagList` (Task 5); `applySuppression` (Task 9); `ObserveScheduler` (Task 10); stats (Task 11); `createBriefStage` (Task 6, tests only).
 - Produces:
   - `observeInput(chat, mesId, settings) → { userText, replyText, textHash }`.
+  - `CATCH_UP_LIMIT = 4`, `catchUpIndices(chat, before, settings, limit) → number[]`: AI replies after the last user message whose record is missing or out of date, oldest first. Plan observes all of them (in order) and waits `observeWaitMs` for the last.
   - `createConductor({ deps, stages, suppression, briefStore }) → Conductor`.
   - `deps`: `{ getSettings(), getChat(), getChatId(), getContextView(), names() → { userName, charName }, saveChat() → Promise, setBriefPrompt(text, depth), countTokens(text) → Promise<number>, notify(stageId, reason, count), onUpdate(), now?(), log?(error) }`.
-  - `Conductor`: `plan(coreChat, contextSize, type)`, `observe(mesId, signal)`, event handlers `onMessageReceived(mesId, type)`, `onMessageEdited(mesId)`, `onMessageSwiped(mesId)`, `onMessageDeleted()`, `onGenerationStarted(type, options, dryRun)`, `onGenerationStopped()`, `onGenerationEnded()`, `onChatChanged()`, `onWorldInfoLoaded(data)`; `currentView() → { index, stateIndex, state, provenance, stale, observed, pending }`; `setState(raw) → Promise<{ ok, error?, state? }>`; `editField(path, value) → Promise<{ ok, error?, state? }>`; `retry() → Promise`; `statusText() → string`; `clearBrief()`; `session: { lastPlan, lastObserve, stats }`.
+  - `Conductor`: `plan(coreChat, contextSize, type)`, `observe(mesId, signal)`, event handlers `onMessageReceived(mesId, type)`, `onMessageEdited(mesId)`, `onMessageSwiped(mesId)`, `onMessageDeleted()`, `onGenerationStarted(type, options, dryRun)`, `onGenerationStopped()`, `onGenerationEnded()`, `onChatChanged()`, `onWorldInfoLoaded(data)`; `currentView() → { chatId, index, stateIndex, state, provenance, stale, observed, pending }`; `setState(raw, expected?: { chatId, index }) → Promise<{ ok, error?, state? }>` (refuses when the chat or latest message changed; cancels an in-flight observe of that message); `observe()` discards its result if the record changed while it ran; `editField(path, value) → Promise<{ ok, error?, state? }>`; `retry() → Promise`; `statusText() → string`; `clearBrief()`; `session: { lastPlan, lastObserve, stats }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2929,7 +3076,7 @@ git commit -m "feat: add session timing and token stats"
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createConductor, observeInput } from '../src/conductor.js';
+import { createConductor, observeInput, catchUpIndices } from '../src/conductor.js';
 import { createBriefStage } from '../src/stages/brief.js';
 import { mergeDefaults } from '../src/settings.js';
 import { makeRecord, validateState } from '../src/state.js';
@@ -3190,6 +3337,76 @@ test('swiping cancels the pending observe for that message', async () => {
     assert.equal(h.scene.calls.length, 0);
 });
 
+test('the brief still runs when the observe wait uses the whole plan budget', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')], overrides: { planBudgetMs: 20, observeWaitMs: 300 }, scene: fakeScene({ delay: 60 }) });
+    await h.conductor.plan([], 8000, 'normal');
+    const brief = h.conductor.session.lastPlan.reports.find((r) => r.id === 'brief');
+    assert.equal(brief.status, 'ran');
+    assert.match(lastPrompt(h.calls), /Location: roof/);
+});
+
+test('commit mode observes every reply of a group turn, in order', async () => {
+    const lycaon = { ...ai('in the rain'), name: 'Lycaon' };
+    const h = harness({ chat: [user('u'), ai('on the roof'), lycaon], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual(h.scene.calls.map((c) => [c.mesId, c.prevLocation]), [[1, ''], [2, 'on the roof']]);
+    assert.match(lastPrompt(h.calls), /Location: in the rain/);
+});
+
+test('catch-up stays within the current run and stops at a current record', () => {
+    const settings = mergeDefaults({});
+    const chat = [ai('old'), user('u'), ai('a'), ai('b'), ai('c')];
+    assert.deepEqual(catchUpIndices(chat, chat.length, settings), [2, 3, 4]);
+    record(chat, 3, settings, { location: 'x' });
+    assert.deepEqual(catchUpIndices(chat, chat.length, settings), [4]);
+    const long = [user('u'), ...Array.from({ length: 6 }, (_, i) => ai(`r${i}`))];
+    assert.deepEqual(catchUpIndices(long, long.length, settings), [3, 4, 5, 6]);
+});
+
+test('a manual edit made while an extraction runs is not overwritten', async () => {
+    const viaScheduler = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ delay: 30 }) });
+    const running = viaScheduler.conductor.retry();
+    await sleep(5);
+    await viaScheduler.conductor.editField('location', 'library');
+    await running;
+    assert.deepEqual([viaScheduler.chat[1].extra.conductor.source, viaScheduler.chat[1].extra.conductor.state.location], ['manual', 'library']);
+
+    const direct = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ delay: 30 }) });
+    const observing = direct.conductor.observe(1, new AbortController().signal);
+    await sleep(5);
+    await direct.conductor.editField('location', 'library');
+    await observing;
+    assert.equal(direct.chat[1].extra.conductor.state.location, 'library');
+});
+
+test('setState refuses a draft from another chat or an older message', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')] });
+    const view = h.conductor.currentView();
+    assert.deepEqual([view.chatId, view.index], ['chat-1', 1]);
+    h.switchChat('chat-2');
+    assert.match((await h.conductor.setState(view.state, { chatId: view.chatId, index: view.index })).error, /chat changed/);
+    h.switchChat('chat-1');
+    h.chat.push(user('again'), ai('garden'));
+    assert.match((await h.conductor.setState(view.state, { chatId: view.chatId, index: view.index })).error, /newer message/);
+    assert.equal((await h.conductor.setState(view.state, { chatId: 'chat-1', index: 3 })).ok, true);
+});
+
+test('a stale copy of a manual record is labelled scene, not manual', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ fail: true }) });
+    h.chat[1].extra = { conductor: makeRecord({ state: validateState({ location: 'library' }).state, source: 'manual' }) };
+    await h.conductor.retry();
+    const rec = h.chat[1].extra.conductor;
+    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'scene', 'library']);
+});
+
+test('continue cancels the pending observe for the last message', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')] });
+    h.conductor.onMessageReceived(1, 'normal');
+    h.conductor.onGenerationStarted('continue', {}, false);
+    await sleep(40);
+    assert.equal(h.scene.calls.length, 0);
+});
+
 test('statusText summarises state', async () => {
     const h = harness({ chat: [user('u'), ai('roof')] });
     assert.match(h.conductor.statusText(), /sangkhem is on\.\nScene: not tracked yet\./);
@@ -3219,12 +3436,31 @@ import { applySuppression } from './stages/lore.js';
 import { ObserveScheduler } from './observe.js';
 import { createStats, recordPlan, recordStageTimes } from './stats.js';
 
+// Most AI replies Plan will observe before one generation: one group turn, not a whole old chat.
+export const CATCH_UP_LIMIT = 4;
+
 /** What Observe reads for chat[mesId], and the hash that says whether a record is still current. */
 export function observeInput(chat, mesId, settings) {
     const userIndex = previousUserIndex(chat, mesId);
     const userText = userIndex >= 0 ? chat[userIndex].mes ?? '' : '';
     const replyText = extractStory(chat[mesId]?.mes ?? '', parseTagList(settings.stages.scene.storyTags));
     return { userText, replyText, textHash: hashText(`${userText}\n${replyText}`) };
+}
+
+/**
+ * AI replies in the current run (after the last user message, before `before`) whose record is
+ * missing or out of date, oldest first. Stops at the first reply with a current record.
+ */
+export function catchUpIndices(chat, before, settings, limit = CATCH_UP_LIMIT) {
+    const indices = [];
+    for (let i = Math.min(before, chat.length) - 1; i >= 0 && indices.length < limit; i--) {
+        const message = chat[i];
+        if (message?.is_user) break;
+        if (!isAiMessage(message)) continue;
+        if (isFresh(message.extra?.conductor, observeInput(chat, i, settings).textHash)) break;
+        indices.push(i);
+    }
+    return indices.reverse();
 }
 
 function ownManualState(message) {
@@ -3264,6 +3500,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         const message = chat[mesId];
         if (!isAiMessage(message)) return;
         const input = observeInput(chat, mesId, current);
+        const recordAtStart = message.extra?.conductor;
         const base = ownManualState(message) ?? readState(chat, { before: mesId });
         const { userName, charName } = deps.names();
         const result = await runPhase(stages, {
@@ -3281,6 +3518,8 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         const live = deps.getChat();
         if (signal.aborted || deps.getChatId() !== chatId || live[mesId] !== message) return;
         if (observeInput(live, mesId, current).textHash !== input.textHash) return;
+        // Edited by hand while the model was working: the edit wins.
+        if (message.extra?.conductor !== recordAtStart) return;
 
         session.lastObserve = { at: now(), mesId, reports: result.reports, scene: result.outputs.scene ?? null };
         recordStageTimes(session.stats, result.reports);
@@ -3291,8 +3530,9 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
                 state: result.state, provenance: result.outputs.scene?.provenance ?? {}, source: 'scene', textHash: input.textHash,
             }));
         } else if (scene?.status === 'failed') {
+            // Labelled 'scene' even when copied from a manual record: it is not a new edit by the user.
             writeRecord(message, makeRecord({
-                state: base.state, provenance: base.record?.provenance ?? {}, source: base.record?.source ?? 'scene',
+                state: base.state, provenance: base.record?.provenance ?? {}, source: 'scene',
                 stale: true, textHash: input.textHash,
             }));
         } else {
@@ -3303,18 +3543,14 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         deps.onUpdate();
     }
 
+    // Observes every reply of the current run that is not up to date, oldest first (the scheduler
+    // runs them in order), and waits up to observeWaitMs for the last one.
     async function ensureObserved(chat, before, current) {
-        const latest = latestAiIndex(chat, before);
-        if (latest < 0) return;
-        if (scheduler.isPending(latest)) {
-            await scheduler.flush(latest, current.observeWaitMs);
-            return;
-        }
         if (current.stages.scene?.enabled === false) return;
-        const { textHash } = observeInput(chat, latest, current);
-        if (isFresh(chat[latest].extra?.conductor, textHash)) return;
-        scheduler.start(latest);
-        await scheduler.flush(latest, current.planBudgetMs);
+        const indices = catchUpIndices(chat, before, current);
+        if (!indices.length) return;
+        for (const index of indices) scheduler.start(index);
+        await scheduler.flush(indices.at(-1), current.observeWaitMs);
     }
 
     async function plan(coreChat, contextSize, rawType) {
@@ -3392,8 +3628,10 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         deps.onUpdate();
     }
 
+    // The last message is about to change (new swipe, regenerated, or continued), so an observe of
+    // its current text would be wasted.
     function onGenerationStarted(type, _options, dryRun) {
-        if (dryRun || (type !== 'swipe' && type !== 'regenerate')) return;
+        if (dryRun || !['swipe', 'regenerate', 'continue'].includes(type)) return;
         scheduler.cancel(deps.getChat().length - 1);
     }
 
@@ -3424,7 +3662,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         const own = index >= 0 ? chat[index].extra?.conductor ?? null : null;
         const { state, record, index: stateIndex } = readState(chat);
         return {
-            index, stateIndex, state,
+            chatId: deps.getChatId(), index, stateIndex, state,
             provenance: record?.provenance ?? {},
             stale: Boolean(own?.stale),
             observed: Boolean(own?.state),
@@ -3432,12 +3670,23 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         };
     }
 
-    async function setState(raw) {
+    /**
+     * Saves a manual edit onto the latest AI message. `expected` ({ chatId, index } from the view the
+     * edit started from) refuses the save if the chat or the latest message changed since.
+     */
+    async function setState(raw, expected = {}) {
         const checked = validateState(raw, { threadsCap: settings().stages.scene.threadsCap });
         if (!checked.ok) return { ok: false, error: checked.error };
         const chat = deps.getChat();
         const index = latestAiIndex(chat);
         if (index < 0) return { ok: false, error: 'no character message to attach the scene to yet' };
+        if ('chatId' in expected && expected.chatId !== deps.getChatId()) {
+            return { ok: false, error: 'the chat changed since you started editing, so the edit was not saved' };
+        }
+        if ('index' in expected && expected.index !== index) {
+            return { ok: false, error: 'a newer message arrived since you started editing, so the edit was not saved' };
+        }
+        scheduler.cancel(index); // an extraction in flight must not overwrite the edit
         const { state: prev, record } = readState(chat);
         const provenance = { ...(record?.provenance ?? {}) };
         for (const path of diffPaths(prev, checked.state)) provenance[path] = { mesId: null, quote: null, manual: true };
@@ -3483,7 +3732,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/conductor.test.js`
-Expected: PASS, 23 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Run the whole suite**
 
@@ -3507,7 +3756,7 @@ git commit -m "feat: add conductor orchestrating plan and observe phases"
 
 **Interfaces:**
 - Consumes: everything above; `initPanel`, `refreshPanel` from `src/ui/panel.js` (Task 14 — until then, `index.js` imports a stub created in Step 3).
-- Produces (`src/st.js`): `ctx()`, `initSettings()`, `getSettings()`, `saveSettings()`, `getChat()`, `getChatId()`, `getContextView() → { extensionSettings, chatMetadata, disabledExtensions }`, `names() → { userName, charName }`, `saveChat() → Promise`, `setBriefPrompt(text, depth)`, `countTokens(text) → Promise<number>`, `scanWorldInfo(chatForWI, contextSize) → Promise<entry[]>`, `sendLlmRequest(profileId, messages, maxTokens, signal) → Promise`, `listProfiles() → [{ id, name }]`, `registerBriefMacro(briefStore)`, `presetPromptTexts() → string[]`, `currentSource() → string`, `currentModel() → string`.
+- Produces (`src/st.js`): `ctx()`, `initSettings()`, `getSettings()`, `saveSettings()`, `getChat()`, `getChatId()`, `getContextView() → { extensionSettings, chatMetadata, disabledExtensions }`, `names() → { userName, charName }`, `saveChat() → Promise`, `setBriefPrompt(text, depth)`, `countTokens(text) → Promise<number>`, `scanWorldInfo(chatForWI, contextSize) → Promise<entry[]>`, `worldInfoIncludeNames() → Promise<boolean>`, `sendLlmRequest(profileId, messages, { maxTokens, temperature, signal }) → Promise` (no sampler preset; explicit temperature), `listProfiles() → [{ id, name }]`, `registerBriefMacro(briefStore)`, `presetPromptTexts() → string[]`, `currentSource() → string`, `currentModel() → string`.
 - Produces (`src/commands.js`): `registerCommands({ conductor, refresh })` adding `/conductor` and `/scene`.
 
 - [ ] **Step 1: Write the failing imports test**
@@ -3606,17 +3855,32 @@ export async function countTokens(text) {
 }
 
 let worldInfoModule;
+async function worldInfo() {
+    worldInfoModule ??= await import('../../../../world-info.js');
+    return worldInfoModule;
+}
+
 /** Dry-run World Info scan with ST's own matcher. */
 export async function scanWorldInfo(chatForWI, contextSize) {
-    worldInfoModule ??= await import('../../../../world-info.js');
-    const scan = await worldInfoModule.checkWorldInfo(chatForWI, contextSize, true);
+    const scan = await (await worldInfo()).checkWorldInfo(chatForWI, contextSize, true);
     return Array.from(scan?.allActivatedEntries?.values?.() ?? []);
 }
 
-export function sendLlmRequest(profileId, messages, maxTokens, signal) {
-    return ctx().ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens, {
-        stream: false, signal, extractData: true, includePreset: true, includeInstruct: true,
-    });
+/** ST's World Info "Include names" setting, so the dry run scans the same text as the real scan. */
+export async function worldInfoIncludeNames() {
+    return Boolean((await worldInfo()).world_info_include_names);
+}
+
+// The profile's sampler preset is not applied (includePreset: false) and the temperature is sent
+// explicitly, so the extension runs the same settings tools/eval-scene.mjs measures.
+export function sendLlmRequest(profileId, messages, { maxTokens, temperature, signal }) {
+    return ctx().ConnectionManagerRequestService.sendRequest(
+        profileId,
+        messages,
+        maxTokens,
+        { stream: false, signal, extractData: true, includePreset: false, includeInstruct: true },
+        temperature === undefined ? {} : { temperature },
+    );
 }
 
 export function listProfiles() {
@@ -3681,7 +3945,7 @@ export function registerCommands({ conductor, refresh }) {
                 saveSettings();
                 refresh();
             } else if (arg !== 'status') {
-                toastr.warning(`Unknown /conductor argument "${arg}". Use on, off, or status.`, 'sangkhem');
+                toastr.warning(`Unknown /conductor argument "${arg}". Use on, off, or status.`, 'sangkhem', { escapeHtml: true });
             }
             const text = conductor.statusText();
             toastr.info(text.replaceAll('\n', '<br>'), 'sangkhem', { escapeHtml: false });
@@ -3710,7 +3974,7 @@ export function registerCommands({ conductor, refresh }) {
                 }
                 const result = await conductor.editField(parsed.path, parsed.value);
                 if (!result.ok) {
-                    toastr.warning(result.error, 'sangkhem');
+                    toastr.warning(result.error, 'sangkhem', { escapeHtml: true });
                     return '';
                 }
             } else if (arg) {
@@ -3759,7 +4023,13 @@ const laya = createLayaScorer();
 
 const stages = [
     createMemoryStage(),
-    createLoreStage({ scorers: { laya, none: noneScorer }, scanWorldInfo: st.scanWorldInfo, countTokens: st.countTokens, suppression }),
+    createLoreStage({
+        scorers: { laya, none: noneScorer },
+        scanWorldInfo: st.scanWorldInfo,
+        countTokens: st.countTokens,
+        includeNames: st.worldInfoIncludeNames,
+        suppression,
+    }),
     createBriefStage({ briefStore, setPrompt: st.setBriefPrompt }),
     createSceneStage({ llm: createLlm(st.sendLlmRequest) }),
 ];
@@ -3777,8 +4047,10 @@ const conductor = createConductor({
         saveChat: st.saveChat,
         setBriefPrompt: st.setBriefPrompt,
         countTokens: st.countTokens,
+        // `reason` can carry model or proxy text, so the toast is always escaped.
         notify: (id, reason, count) => toastr.warning(
-            `The ${id} stage failed ${count} turns in a row (${reason}). Replies still generate without it.`, 'sangkhem'),
+            `The ${id} stage failed ${count} turns in a row (${reason}). Replies still generate without it.`,
+            'sangkhem', { escapeHtml: true }),
         onUpdate: () => refreshPanel(),
         log: (error) => console.error(`${LOG_PREFIX} observe failed`, error),
     },
@@ -3862,7 +4134,7 @@ git commit -m "feat: wire conductor into SillyTavern with commands"
 - Produces:
   - `h(tag, props = {}, children = [], doc = globalThis.document) → Element` — text only via `textContent`/text nodes. Supported props: `class`, `text`, `value`, `checked`, `type`, `title`, `placeholder`, `rows`, `data-*`, `on<event>`. Anything else throws.
   - `format.js`: `reportLine(report)`, `statsLines(summary)`, `briefDoubleWarning(mode, promptTexts)`, `cacheHint({ source, model, protectCachePrefix })`, `provenanceText(entry)`.
-  - `panel.js`: `initPanel({ conductor, stages, laya })`, `refreshPanel()`.
+  - `panel.js`: `initPanel({ conductor, stages, laya })`, `refreshPanel()`. A scene draft remembers the chat id and message index it was opened for; a draft for another chat or an older message is dropped on refresh and refused on save.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4030,7 +4302,7 @@ export function provenanceText(entry) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test tests/dom.test.js tests/format.test.js`
-Expected: PASS, 8 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Write `settings.html`**
 
@@ -4066,7 +4338,7 @@ Expected: PASS, 8 tests.
                     </select>
                 </label>
                 <label>Settle delay (ms) <input class="text_pole" type="number" min="0" data-sk-setting="settleMs"></label>
-                <label>Wait for a running observe (ms) <input class="text_pole" type="number" min="0" data-sk-setting="observeWaitMs"></label>
+                <label>Wait for scene tracking before a reply (ms) <input class="text_pole" type="number" min="0" data-sk-setting="observeWaitMs"></label>
                 <label>Warn after this many failures in a row <input class="text_pole" type="number" min="1" data-sk-setting="failureToastAfter"></label>
 
                 <h5>Memory</h5>
@@ -4096,7 +4368,6 @@ Expected: PASS, 8 tests.
                 <label>Usefulness weight <input class="text_pole" type="number" step="0.1" data-sk-setting="stages.lore.wUsefulness"></label>
                 <label>Minimum score to keep <input class="text_pole" type="number" step="0.1" data-sk-setting="stages.lore.minScore"></label>
                 <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.lore.protectCachePrefix"> Protect cache prefix (only judge @depth entries)</label>
-                <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.lore.includeNames"> Include names when scanning</label>
 
                 <h5>Brief</h5>
                 <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.brief.enabled"> Enabled</label>
@@ -4116,6 +4387,7 @@ Expected: PASS, 8 tests.
                 </label>
                 <label>Timeout (ms) <input class="text_pole" type="number" min="0" data-sk-setting="stages.scene.timeoutMs"></label>
                 <label>Max reply tokens <input class="text_pole" type="number" min="100" data-sk-setting="stages.scene.maxTokens"></label>
+                <label>Temperature (also used by the eval tool) <input class="text_pole" type="number" min="0" max="2" step="0.1" data-sk-setting="stages.scene.temperature"></label>
                 <label>Max open threads <input class="text_pole" type="number" min="1" data-sk-setting="stages.scene.threadsCap"></label>
                 <label>Story tags (comma separated) <input class="text_pole" type="text" data-sk-setting="stages.scene.storyTags"></label>
                 <label class="checkbox_label"><input type="checkbox" data-sk-setting="stages.scene.fields.location"> Track location</label>
@@ -4319,6 +4591,9 @@ import { renderInspector } from './inspector.js';
 let root = null;
 let deps = null;
 let sceneDirty = false;
+let draftKey = null; // chat and message the open draft belongs to
+
+const viewKey = (view) => `${view.chatId}:${view.index}`;
 
 export async function initPanel(options) {
     deps = options;
@@ -4335,15 +4610,16 @@ export async function initPanel(options) {
     refreshPanel();
 }
 
-function renderScene() {
+function renderScene(view = deps.conductor.currentView()) {
+    draftKey = viewKey(view);
     renderScenePanel(root.querySelector('#sangkhem-scene-panel'), {
-        view: deps.conductor.currentView(),
+        view,
         fields: getSettings().stages.scene.fields,
         onDirty: () => { sceneDirty = true; },
         onSave: async (draft) => {
-            const result = await deps.conductor.setState(draft);
+            const result = await deps.conductor.setState(draft, { chatId: view.chatId, index: view.index });
             if (!result.ok) {
-                toastr.warning(result.error, 'sangkhem');
+                toastr.warning(result.error, 'sangkhem', { escapeHtml: true });
                 return;
             }
             sceneDirty = false;
@@ -4370,7 +4646,10 @@ export function refreshPanel() {
         ].filter(Boolean);
         root.querySelector('#sangkhem-warnings').replaceChildren(...warnings.map((text) => h('div', { class: 'sk-warning', text })));
         renderInspector(root.querySelector('#sangkhem-inspector'), deps.conductor.session, summarizeStats(deps.conductor.session.stats));
-        if (!sceneDirty) renderScene();
+        const view = deps.conductor.currentView();
+        // A draft for another chat or an older message is dropped rather than saved onto this one.
+        if (sceneDirty && draftKey !== viewKey(view)) sceneDirty = false;
+        if (!sceneDirty) renderScene(view);
     } catch (error) {
         console.error('[sangkhem] panel refresh failed', error);
     }
@@ -4493,9 +4772,9 @@ git commit -m "chore: ship the Laya scoring service"
 - Consumes: `createSceneStage` (Task 7), `validateState`, `PERSON_ATTRS` (Task 3), `normalize` (Task 4), `mergeDefaults` (Task 1).
 - Produces:
   - `fieldMatches(expected, actual) → boolean` (both empty; equal; one contains the other; or word Jaccard ≥ 0.5).
-  - `scoreFixture(expected, actual) → [{ field, ok }]` — checks only the fields present in `expected`.
-  - `summarize(results: [{ checks }]) → { accuracy: number|null, byField: { [field]: { ok, total } } }`.
-  - CLI: `EVAL_API_KEY=… node tools/eval-scene.mjs --url <OpenAI-compatible base URL> --model <id> [--fixtures dir] [--max-tokens n]`. Exit code 0 when accuracy ≥ 0.9.
+  - `scoreFixture(expected, actual, prev) → [{ field, changed, ok }]` — checks only the fields present in `expected`; `changed` means the fixture expects that field to differ from `prev`. An answer identical to `prev` fails an expected change even if it loosely matches.
+  - `summarize(results: [{ checks }]) → { recall, stability, changes, byField: { [field]: { ok, total } } }` — recall over changed checks, stability over the rest.
+  - CLI: `EVAL_API_KEY=… node tools/eval-scene.mjs --url <OpenAI-compatible base URL> --model <id> [--fixtures dir] [--max-tokens n]`. Uses the extension's scene settings (same temperature). A call that errors fails every check. Exit code 0 when recall ≥ 0.9 and stability ≥ 0.9.
   - Fixture format: `{ name, userName, charName, prev, user, reply, expected }`.
 
 - [ ] **Step 1: Write the failing test**
@@ -4504,8 +4783,11 @@ git commit -m "chore: ship the Laya scoring service"
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fieldMatches, scoreFixture, summarize } from '../tools/eval-score.mjs';
 import { validateState } from '../src/state.js';
+
+const S = (raw) => validateState(raw, { threadsCap: 99 }).state;
 
 test('fieldMatches is loose about wording', () => {
     assert.equal(fieldMatches('', ''), true);
@@ -4515,38 +4797,47 @@ test('fieldMatches is loose about wording', () => {
     assert.equal(fieldMatches('kitchen', 'rooftop'), false);
 });
 
-test('scoreFixture checks only expected fields', () => {
-    const actual = validateState({
-        location: 'rooftop', time: 'night',
-        present: [{ name: 'Ellen', outfit: 'red coat' }, { name: 'Mara' }],
-        threads: ['meet at the pier at dawn'],
-    }).state;
+test('scoreFixture marks changed fields and checks only expected ones', () => {
+    const prev = S({ location: 'kitchen', present: [{ name: 'Ellen', outfit: 'hoodie' }, { name: 'Mara' }], threads: [] });
+    const actual = S({ location: 'rooftop', present: [{ name: 'Ellen', outfit: 'red coat' }, { name: 'Mara' }], threads: ['meet at the pier at dawn'] });
     const checks = scoreFixture({
         location: 'roof', present: [{ name: 'Ellen', outfit: 'coat' }, { name: 'Mara' }], threads: ['meet at dawn at the old pier'],
-    }, actual);
+    }, actual, prev);
     assert.deepEqual(checks, [
-        { field: 'location', ok: true },
-        { field: 'present.names', ok: true },
-        { field: 'present.outfit', ok: true },
-        { field: 'threads', ok: true },
-        { field: 'threads.extra', ok: true },
+        { field: 'location', changed: true, ok: true },
+        { field: 'present.names', changed: false, ok: true },
+        { field: 'present.outfit', changed: true, ok: true },
+        { field: 'threads', changed: true, ok: true },
+        { field: 'threads.closed', changed: false, ok: true },
     ]);
 });
 
-test('scoreFixture flags missing and extra people and threads', () => {
-    const actual = validateState({ present: [{ name: 'Ellen' }, { name: 'Lycaon' }], threads: ['a', 'b'] }).state;
-    const checks = scoreFixture({ present: [{ name: 'Ellen' }], threads: ['a'] }, actual);
-    assert.deepEqual(checks.map((c) => [c.field, c.ok]), [['present.names', false], ['threads', true], ['threads.extra', false]]);
+test('an unchanged answer fails an expected change even if it loosely matches', () => {
+    const prev = S({ present: [{ name: 'Mara', outfit: 'jacket over a t-shirt' }] });
+    const [, outfit] = scoreFixture({ present: [{ name: 'Mara', outfit: 't-shirt' }] }, prev, prev);
+    assert.deepEqual(outfit, { field: 'present.outfit', changed: true, ok: false });
 });
 
-test('summarize totals per field', () => {
+test('summarize reports recall and stability separately', () => {
     const summary = summarize([
-        { checks: [{ field: 'location', ok: true }, { field: 'time', ok: false }] },
-        { checks: [{ field: 'location', ok: true }] },
+        { checks: [{ field: 'location', changed: true, ok: true }, { field: 'time', changed: false, ok: true }] },
+        { checks: [{ field: 'location', changed: true, ok: false }] },
     ]);
-    assert.equal(summary.accuracy, 2 / 3);
-    assert.deepEqual(summary.byField, { location: { ok: 2, total: 2 }, time: { ok: 0, total: 1 } });
-    assert.equal(summarize([]).accuracy, null);
+    assert.deepEqual([summary.recall, summary.stability, summary.changes], [0.5, 1, 2]);
+    assert.deepEqual(summary.byField.location, { ok: 1, total: 2 });
+    assert.equal(summarize([]).recall, null);
+});
+
+test('a model that changes nothing scores zero recall on the fixtures', () => {
+    const dir = new URL('../tools/fixtures/scene/', import.meta.url);
+    const results = readdirSync(dir).filter((f) => f.endsWith('.json')).map((file) => {
+        const fixture = JSON.parse(readFileSync(new URL(file, dir), 'utf8'));
+        const prev = validateState(fixture.prev).state;
+        return { checks: scoreFixture(fixture.expected, prev, prev) };
+    });
+    const summary = summarize(results);
+    assert.equal(summary.recall, 0);
+    assert.ok(summary.changes >= 7);
 });
 ```
 
@@ -4562,6 +4853,7 @@ import { normalize } from '../src/evidence.js';
 import { PERSON_ATTRS } from '../src/state.js';
 
 const words = (text) => new Set(normalize(text).replace(/[^\p{L}\p{N}\s]/gu, ' ').split(' ').filter(Boolean));
+const same = (a, b) => normalize(a) === normalize(b);
 
 /** Loose match: models word things differently, so containment or half the words in common counts. */
 export function fieldMatches(expected, actual) {
@@ -4577,62 +4869,90 @@ export function fieldMatches(expected, actual) {
     return union > 0 && shared / union >= 0.5;
 }
 
-export function scoreFixture(expected, actual) {
+// A field the fixture expects to change only passes if the model changed it: an answer identical to
+// the previous value fails even when the loose match would accept it.
+function check(field, expected, actual, previous) {
+    const changed = !same(expected, previous);
+    const ok = fieldMatches(expected, actual) && !(changed && same(actual, previous));
+    return { field, changed, ok };
+}
+
+/**
+ * Checks only the fields present in `expected`. Each check says whether the fixture expects that
+ * field to change from `prev` (recall) or stay the same (stability).
+ */
+export function scoreFixture(expected, actual, prev) {
     const checks = [];
     for (const field of ['location', 'time']) {
-        if (field in expected) checks.push({ field, ok: fieldMatches(expected[field], actual[field]) });
+        if (field in expected) checks.push(check(field, expected[field], actual[field], prev[field]));
     }
     if (expected.present) {
+        const key = (people) => people.map((p) => normalize(p.name)).sort().join('|');
         const actualByName = new Map(actual.present.map((p) => [normalize(p.name), p]));
-        const expectedNames = new Set(expected.present.map((p) => normalize(p.name)));
+        const prevByName = new Map(prev.present.map((p) => [normalize(p.name), p]));
         checks.push({
             field: 'present.names',
-            ok: expectedNames.size === actualByName.size && [...expectedNames].every((name) => actualByName.has(name)),
+            changed: key(expected.present) !== key(prev.present),
+            ok: key(expected.present) === key(actual.present),
         });
         for (const person of expected.present) {
             for (const attr of PERSON_ATTRS) {
-                if (attr in person) {
-                    checks.push({ field: `present.${attr}`, ok: fieldMatches(person[attr], actualByName.get(normalize(person.name))?.[attr] ?? '') });
-                }
+                if (!(attr in person)) continue;
+                const name = normalize(person.name);
+                checks.push(check(`present.${attr}`, person[attr], actualByName.get(name)?.[attr] ?? '', prevByName.get(name)?.[attr] ?? ''));
             }
         }
     }
     if (expected.threads) {
-        for (const thread of expected.threads) checks.push({ field: 'threads', ok: actual.threads.some((t) => fieldMatches(thread, t)) });
-        checks.push({ field: 'threads.extra', ok: actual.threads.length <= expected.threads.length });
+        for (const thread of expected.threads) {
+            checks.push({
+                field: 'threads',
+                changed: !prev.threads.some((t) => fieldMatches(thread, t)),
+                ok: actual.threads.some((t) => fieldMatches(thread, t)),
+            });
+        }
+        checks.push({
+            field: 'threads.closed',
+            changed: prev.threads.length > expected.threads.length,
+            ok: actual.threads.length <= expected.threads.length,
+        });
     }
     return checks;
 }
 
+const ratio = (checks) => (checks.length ? checks.filter((c) => c.ok).length / checks.length : null);
+
+/** recall: expected changes found; stability: unchanged fields left alone. */
 export function summarize(results) {
+    const all = results.flatMap((r) => r.checks);
     const byField = {};
-    let ok = 0;
-    let total = 0;
-    for (const { checks } of results) {
-        for (const check of checks) {
-            byField[check.field] ??= { ok: 0, total: 0 };
-            byField[check.field].total++;
-            total++;
-            if (check.ok) {
-                byField[check.field].ok++;
-                ok++;
-            }
-        }
+    for (const c of all) {
+        byField[c.field] ??= { ok: 0, total: 0 };
+        byField[c.field].total++;
+        if (c.ok) byField[c.field].ok++;
     }
-    return { accuracy: total ? ok / total : null, byField };
+    return {
+        recall: ratio(all.filter((c) => c.changed)),
+        stability: ratio(all.filter((c) => !c.changed)),
+        changes: all.filter((c) => c.changed).length,
+        byField,
+    };
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/eval-score.test.js`
-Expected: PASS, 4 tests.
+Expected: PASS, 0 failures.
 
 - [ ] **Step 5: Write `tools/eval-scene.mjs`**
 
 ```js
 #!/usr/bin/env node
-// Measures scene extraction for one model against tools/fixtures/scene.
+// Measures scene extraction for one model against tools/fixtures/scene. Uses the extension's own
+// scene settings (including its pinned temperature) so it measures what the extension sends.
+// Reports change recall (did the model catch what changed) and stability (did it leave the rest
+// alone). A call that errors counts as failing every check.
 // Usage: EVAL_API_KEY=... node tools/eval-scene.mjs --url https://openrouter.ai/api/v1 --model google/gemini-2.5-flash
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -4657,14 +4977,14 @@ if (!values.url || !values.model) {
 }
 
 const llm = {
-    async complete(_profileId, messages, { maxTokens, signal }) {
+    async complete(_profileId, messages, { maxTokens, temperature, signal }) {
         const response = await fetch(`${values.url.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 ...(process.env.EVAL_API_KEY ? { Authorization: `Bearer ${process.env.EVAL_API_KEY}` } : {}),
             },
-            body: JSON.stringify({ model: values.model, messages, max_tokens: maxTokens, temperature: 0 }),
+            body: JSON.stringify({ model: values.model, messages, max_tokens: maxTokens, temperature }),
             signal,
         });
         if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
@@ -4696,19 +5016,21 @@ for (const file of files) {
     } catch (e) {
         error = e.message;
     }
-    const checks = scoreFixture(fixture.expected, state);
+    const scored = scoreFixture(fixture.expected, state, prev);
+    const checks = error ? scored.map((c) => ({ ...c, ok: false })) : scored;
     rejections += rejected.length;
     results.push({ name: fixture.name, checks });
     const passed = checks.filter((c) => c.ok).length;
     console.log(`${passed === checks.length ? 'PASS' : 'FAIL'} ${fixture.name} (${passed}/${checks.length})${error ? ` error: ${error}` : ''}`);
-    for (const check of checks) if (!check.ok) console.log(`    wrong: ${check.field}`);
+    for (const check of checks) if (!check.ok) console.log(`    wrong: ${check.field}${check.changed ? ' (missed change)' : ' (changed something that should stay)'}`);
     for (const r of rejected) console.log(`    gate rejected ${r.path}: ${r.reason}`);
 }
 
 const summary = summarize(results);
-console.log(`\nField accuracy: ${((summary.accuracy ?? 0) * 100).toFixed(1)}% over ${files.length} fixtures; ${rejections} gate rejection(s).`);
+const pct = (value) => `${((value ?? 0) * 100).toFixed(1)}%`;
+console.log(`\nChange recall: ${pct(summary.recall)} of ${summary.changes} expected changes. Stability: ${pct(summary.stability)}. ${rejections} gate rejection(s).`);
 for (const [field, s] of Object.entries(summary.byField)) console.log(`  ${field}: ${s.ok}/${s.total}`);
-process.exitCode = (summary.accuracy ?? 0) >= 0.9 ? 0 : 1;
+process.exitCode = (summary.recall ?? 0) >= 0.9 && (summary.stability ?? 0) >= 0.9 ? 0 : 1;
 ```
 
 - [ ] **Step 6: Write the fixtures**
@@ -4815,7 +5137,7 @@ Pick the model you plan to use for the Scene stage (for example the Gemma-4-E4B 
 ```bash
 node tools/eval-scene.mjs --url http://localhost:1234/v1 --model rpdungeon_gemma-4-e4b-luchador
 ```
-Expected: one PASS/FAIL line per fixture and a field-accuracy line. Record the result in the commit message. If accuracy is below 90%, try another model before relying on scene tracking; this is success criterion 1. The eight fixtures are a starting set — add more from real chats (edit names and details) as you play.
+Expected: one PASS/FAIL line per fixture, then change recall and stability. Record both in the commit message. If recall or stability is below 90%, try another model before relying on scene tracking; this is success criterion 1. (A model that changes nothing scores 0% recall; `tests/eval-score.test.js` pins that.) The eight fixtures are a starting set — add more from real chats (edit names and details) as you play.
 
 - [ ] **Step 8: Commit**
 
@@ -4879,7 +5201,7 @@ The Stages list shows what is ready and what each stage needs.
 | Extension | What sangkhem does |
 |---|---|
 | Summaryception | Reads its summary; never injects it again. |
-| SnapCompact | Leaves it alone. |
+| SnapCompact | Leaves it alone. Lore entries the Lore stage drops are disabled before ST's real scan, so SnapCompact never receives or images them. |
 | Laya WI Director | Replaces its lore pruning (turn that off); its reply guard keeps working. |
 | Recast | Leaves it alone; scene tracking reads the rewritten reply. |
 | CoT Guard, reasoning | Scene tracking ignores CoT blocks and skips replies that get auto-swiped. |
@@ -4916,6 +5238,10 @@ Run in a real SillyTavern with sangkhem symlinked into `data/default-user/extens
 - [ ] Branch from a message: the branch shows the state at that message.
 - [ ] Stop a generation mid-plan: no error, next send works.
 - [ ] Switch chats while a reply is being observed: nothing is written into the other chat.
+- [ ] Group chat (two characters reply in a row): the second reply's scene includes changes from the first.
+- [ ] Commit mode (Settings → Observe → when I send my next message): after a group turn, both replies are observed in order before the next plan.
+- [ ] Edit a scene field while "Updating…" is shown and save: your edit is still there after the extraction finishes.
+- [ ] Start editing the scene, switch chats, switch back: the draft is gone and nothing was saved into the other chat.
 
 ## Other extensions
 
@@ -4927,6 +5253,8 @@ Run in a real SillyTavern with sangkhem symlinked into `data/default-user/extens
 ## Failure paths
 
 - [ ] Stop the Laya service mid-session: Lore shows "unreachable" and replies still generate.
+- [ ] Point the Lore service URL at an address that never answers and press Test connection: it reports failure within about 3 s.
+- [ ] Slow scene model with a small plan budget: the brief is still injected (inspector shows brief ran).
 - [ ] Pick a scene profile whose API key is wrong: after 3 replies one warning toast appears; Scene shows "Out of date" with Retry.
 - [ ] Put `<b>x</b>` in a scene field and save: it displays literally.
 
