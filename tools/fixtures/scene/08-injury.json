@@ -1,0 +1,8 @@
+{
+    "name": "an injury",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "Hollow, ruined subway platform", "time": "unknown", "present": [{ "name": "Ellen", "condition": "" }, { "name": "Mara" }], "threads": [] },
+    "user": "*I shout a warning as the Ethereal lunges.*",
+    "reply": "Too late. The creature's claw catches Ellen's forearm; she hisses as blood wells through her sleeve.",
+    "expected": { "present": [{ "name": "Ellen", "condition": "forearm cut, bleeding" }, { "name": "Mara" }] }
+}

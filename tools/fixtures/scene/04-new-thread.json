@@ -1,0 +1,8 @@
+{
+    "name": "a meeting is set up",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "cafe", "time": "evening", "present": [{ "name": "Ellen" }, { "name": "Mara" }], "threads": ["Ellen owes Mara a favor"] },
+    "user": "So what do you need from me?",
+    "reply": "Ellen slides a folded note across the table. \"Tomorrow at dawn. The old pier. Come alone.\"",
+    "expected": { "threads": ["Ellen owes Mara a favor", "meet Ellen at the old pier at dawn"] }
+}

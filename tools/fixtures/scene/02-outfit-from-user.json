@@ -1,0 +1,8 @@
+{
+    "name": "user gives away a jacket",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "rooftop", "time": "night", "present": [{ "name": "Ellen", "outfit": "oversized hoodie" }, { "name": "Mara", "outfit": "jacket over a t-shirt" }], "threads": [] },
+    "user": "*I shrug off my jacket and drape it over Ellen's shoulders.*",
+    "reply": "Ellen blinks at the jacket, then tugs it tighter around herself. \"Don't get used to this.\"",
+    "expected": { "location": "rooftop", "present": [{ "name": "Ellen", "outfit": "jacket over hoodie" }, { "name": "Mara", "outfit": "t-shirt" }] }
+}

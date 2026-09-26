@@ -1,0 +1,8 @@
+{
+    "name": "nothing changes",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "Ellen's apartment, living room", "time": "night, raining", "present": [{ "name": "Ellen", "outfit": "oversized hoodie", "mood": "bored" }, { "name": "Mara" }], "threads": ["Ellen owes Mara a favor"] },
+    "user": "What are you thinking about?",
+    "reply": "Ellen shrugs, watching the rain streak the window. \"Nothing. Sharks, maybe.\"",
+    "expected": { "location": "Ellen's apartment, living room", "time": "night, raining", "present": [{ "name": "Ellen", "outfit": "oversized hoodie" }, { "name": "Mara" }], "threads": ["Ellen owes Mara a favor"] }
+}

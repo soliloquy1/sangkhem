@@ -1,0 +1,8 @@
+{
+    "name": "a thread is resolved",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "Ellen's apartment, living room", "time": "night", "present": [{ "name": "Ellen" }, { "name": "Mara" }], "threads": ["shark plushie still missing", "Ellen owes Mara a favor"] },
+    "user": "Did you check under the couch?",
+    "reply": "Ellen digs under the cushions and pulls out the shark plushie, looking smug. \"Found him.\"",
+    "expected": { "threads": ["Ellen owes Mara a favor"] }
+}

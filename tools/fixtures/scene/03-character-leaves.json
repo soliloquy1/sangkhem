@@ -1,0 +1,8 @@
+{
+    "name": "a character leaves",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "Victoria Housekeeping lobby", "time": "afternoon", "present": [{ "name": "Ellen" }, { "name": "Lycaon" }, { "name": "Mara" }], "threads": [] },
+    "user": "Could someone bring the car around?",
+    "reply": "Lycaon bows. \"I will see to it.\" He leaves, the door clicking shut behind him. Ellen yawns.",
+    "expected": { "present": [{ "name": "Ellen" }, { "name": "Mara" }] }
+}

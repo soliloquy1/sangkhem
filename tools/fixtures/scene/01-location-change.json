@@ -1,0 +1,8 @@
+{
+    "name": "moves to the rooftop",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "Ellen's apartment, kitchen", "time": "evening", "present": [{ "name": "Ellen", "outfit": "oversized hoodie" }, { "name": "Mara" }], "threads": [] },
+    "user": "Let's get some air. *I head for the stairs up to the roof.*",
+    "reply": "Ellen trails after you up the stairs and shoulders open the rooftop door. Cold wind whips her hair across her face.",
+    "expected": { "location": "rooftop", "present": [{ "name": "Ellen", "outfit": "oversized hoodie" }, { "name": "Mara" }] }
+}

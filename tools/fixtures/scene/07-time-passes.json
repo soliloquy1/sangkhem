@@ -1,0 +1,8 @@
+{
+    "name": "time passes",
+    "userName": "Mara", "charName": "Ellen",
+    "prev": { "location": "Ellen's apartment, living room", "time": "early evening", "present": [{ "name": "Ellen" }, { "name": "Mara" }], "threads": [] },
+    "user": "*I put on another movie.*",
+    "reply": "Hours slip by. By the time the credits roll, it's past midnight and the sky outside has gone pitch black.",
+    "expected": { "time": "past midnight" }
+}
