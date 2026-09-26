@@ -236,6 +236,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         const { state, record, index: stateIndex } = readState(chat);
         return {
             chatId: deps.getChatId(), index, stateIndex, state,
+            textHash: index >= 0 ? observeInput(chat, index, settings()).textHash : null,
             provenance: record?.provenance ?? {},
             stale: Boolean(own?.stale),
             observed: Boolean(own?.state),
@@ -244,8 +245,10 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
     }
 
     /**
-     * Saves a manual edit onto the latest AI message. `expected` ({ chatId, index } from the view the
-     * edit started from) refuses the save if the chat or the latest message changed since.
+     * Saves a manual edit onto the latest AI message. `expected` ({ chatId, index, textHash } from the
+     * view the edit started from) refuses the save if the chat, the latest message, or that message's
+     * text (swipe, regenerate, edit) changed since. The record is stamped with the message's current
+     * text hash, so Plan treats it as current and never re-extracts over the edit.
      */
     async function setState(raw, expected = {}) {
         const checked = validateState(raw, { threadsCap: settings().stages.scene.threadsCap });
@@ -259,12 +262,16 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         if ('index' in expected && expected.index !== index) {
             return { ok: false, error: 'a newer message arrived since you started editing, so the edit was not saved' };
         }
+        const { textHash } = observeInput(chat, index, settings());
+        if ('textHash' in expected && expected.textHash !== textHash) {
+            return { ok: false, error: 'the message changed since you started editing (swiped, regenerated or edited), so the edit was not saved' };
+        }
         scheduler.cancel(index); // an extraction in flight must not overwrite the edit
         const { state: prev, record } = readState(chat);
         const provenance = { ...(record?.provenance ?? {}) };
         for (const path of diffPaths(prev, checked.state)) provenance[path] = { mesId: null, quote: null, manual: true };
         writeRecord(chat[index], makeRecord({
-            state: checked.state, provenance, source: 'manual', textHash: chat[index].extra?.conductor?.textHash ?? null,
+            state: checked.state, provenance, source: 'manual', textHash,
         }));
         await deps.saveChat();
         deps.onUpdate();

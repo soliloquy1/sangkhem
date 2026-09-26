@@ -307,6 +307,7 @@ test('setState refuses a draft from another chat or an older message', async () 
     const h = harness({ chat: [user('u'), ai('roof')] });
     const view = h.conductor.currentView();
     assert.deepEqual([view.chatId, view.index], ['chat-1', 1]);
+    assert.match(view.textHash, /^[0-9a-f]{8}$/);
     h.switchChat('chat-2');
     assert.match((await h.conductor.setState(view.state, { chatId: view.chatId, index: view.index })).error, /chat changed/);
     h.switchChat('chat-1');
@@ -329,6 +330,34 @@ test('continue cancels the pending observe for the last message', async () => {
     h.conductor.onGenerationStarted('continue', {}, false);
     await sleep(40);
     assert.equal(h.scene.calls.length, 0);
+});
+
+test('a manual edit on a reply with no record survives the next plan', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ delay: 30 }) });
+    const running = h.conductor.retry();
+    await sleep(5);
+    await h.conductor.editField('location', 'library');
+    await running;
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual([h.chat[1].extra.conductor.source, h.chat[1].extra.conductor.state.location], ['manual', 'library']);
+    assert.match(lastPrompt(h.calls), /Location: library/);
+});
+
+test('in commit mode a manual edit is not re-extracted at the next plan', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.editField('location', 'library');
+    await h.conductor.plan([], 8000, 'normal');
+    assert.equal(h.scene.calls.length, 0);
+    assert.equal(h.chat[1].extra.conductor.state.location, 'library');
+});
+
+test('setState refuses a draft opened on a different swipe of the same message', async () => {
+    const h = harness({ chat: [user('u'), ai('roof')] });
+    const view = h.conductor.currentView();
+    h.chat[1].mes = 'garden';
+    const result = await h.conductor.setState(view.state, { chatId: view.chatId, index: view.index, textHash: view.textHash });
+    assert.match(result.error, /message changed/);
+    assert.equal(h.chat[1].extra.conductor, undefined);
 });
 
 test('statusText summarises state', async () => {
