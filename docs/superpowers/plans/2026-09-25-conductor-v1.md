@@ -3927,11 +3927,17 @@ export function listProfiles() {
     }
 }
 
+// Registers {{conductor_brief}} in both macro engines. The legacy registry serves SillyTavern's default
+// engine and bridges into the new engine itself when that engine is on at startup; registering in the new
+// engine as well covers a user who turns it on later.
 export function registerBriefMacro(briefStore) {
     const c = ctx();
     const handler = () => briefStore.value;
-    if (c.macros?.register) c.macros.register('conductor_brief', { description: 'sangkhem scene notes for this turn', handler });
-    else c.registerMacro('conductor_brief', handler);
+    const description = 'sangkhem scene notes for this turn';
+    c.registerMacro('conductor_brief', handler, description);
+    if (c.macros?.register && !c.macros.registry?.hasMacro?.('conductor_brief')) {
+        c.macros.register('conductor_brief', { description, handler });
+    }
 }
 
 export function presetPromptTexts() {
