@@ -13,7 +13,7 @@ import { registerCommands } from './src/commands.js';
 
 const suppression = new Set();
 const briefStore = { value: '' };
-const laya = createLayaScorer();
+const laya = createLayaScorer({ getServiceUrl: () => st.getSettings().stages.lore.serviceUrl });
 
 const stages = [
     createMemoryStage(),

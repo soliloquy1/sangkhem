@@ -31,6 +31,7 @@ The Stages list shows what is ready and what each stage needs.
 ## Using it
 
 - The **Scene** section shows the current state. Edit and save to correct it; your edit wins until new evidence changes it. "Where these came from" links each fact to the message it was quoted from.
+- If an extraction fails, the Scene section shows **Out of date** with a **Retry** button. It is not retried automatically; Retry, editing the message, or a new reply tries again.
 - The **Last turn** section shows what each stage did and how long it took, plus session timings.
 - `/conductor on|off|status`, `/scene`, `/scene set location=rooftop`, `/scene set present.Ellen.outfit=red coat`.
 - Put `{{conductor_brief}}` in your preset and set Brief placement to macro mode to place the notes yourself.

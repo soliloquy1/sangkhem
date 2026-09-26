@@ -316,12 +316,64 @@ test('setState refuses a draft from another chat or an older message', async () 
     assert.equal((await h.conductor.setState(view.state, { chatId: 'chat-1', index: 3 })).ok, true);
 });
 
-test('a stale copy of a manual record is labelled scene, not manual', async () => {
+test('a failed observe keeps this message\'s own hand edit as manual, so Retry builds on it', async () => {
     const h = harness({ chat: [user('u'), ai('roof')], scene: fakeScene({ fail: true }) });
     h.chat[1].extra = { conductor: makeRecord({ state: validateState({ location: 'library' }).state, source: 'manual' }) };
     await h.conductor.retry();
     const rec = h.chat[1].extra.conductor;
-    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'scene', 'library']);
+    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'manual', 'library']);
+    await h.conductor.retry();
+    assert.equal(h.scene.calls[1].prevLocation, 'library');
+});
+
+test('a stale copy of an earlier message\'s state is labelled scene', async () => {
+    const h = harness({ chat: [ai('a'), user('u'), ai('b')], scene: fakeScene({ fail: true }) });
+    h.chat[0].extra = { conductor: makeRecord({ state: validateState({ location: 'kitchen' }).state, source: 'manual' }) };
+    await h.conductor.retry();
+    const rec = h.chat[2].extra.conductor;
+    assert.deepEqual([rec.stale, rec.source, rec.state.location], [true, 'scene', 'kitchen']);
+});
+
+test('in ST order (user message already appended) plan catches up the previous reply', async () => {
+    const h = harness({ chat: [user('u1'), ai('rooftop'), user('u2')], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual(h.scene.calls.map((c) => c.mesId), [1]);
+    assert.match(lastPrompt(h.calls), /Location: rooftop/);
+});
+
+test('in ST order a group turn is caught up in order', async () => {
+    const lycaon = { ...ai('in the rain'), name: 'Lycaon' };
+    const h = harness({ chat: [user('u1'), ai('on the roof'), lycaon, user('u2')], overrides: { observeTrigger: 'commit' } });
+    await h.conductor.plan([], 8000, 'normal');
+    assert.deepEqual(h.scene.calls.map((c) => [c.mesId, c.prevLocation]), [[1, ''], [2, 'on the roof']]);
+});
+
+test('in ST order plan waits for the pending observe of the reply before the new message', async () => {
+    const h = harness({ chat: [user('u1'), ai('roof')], overrides: { settleMs: 10000 } });
+    h.conductor.onMessageReceived(1, 'normal');
+    h.chat.push(user('u2'));
+    await h.conductor.plan([], 8000, 'normal');
+    assert.equal(h.scene.calls.length, 1);
+    assert.match(lastPrompt(h.calls), /Location: roof/);
+});
+
+test('in ST order a swipe reads state from before the replaced reply', async () => {
+    const h = harness({ chat: [user('u1'), ai('a'), user('u2'), ai('b')] });
+    record(h.chat, 1, h.settings, { location: 'A' });
+    record(h.chat, 3, h.settings, { location: 'B' });
+    await h.conductor.plan([], 8000, 'swipe');
+    assert.equal(h.scene.calls.length, 0);
+    assert.match(lastPrompt(h.calls), /Location: A/);
+});
+
+test('stopping the generation ends the observe wait at once', async () => {
+    const h = harness({ chat: [user('u1'), ai('roof'), user('u2')], overrides: { observeWaitMs: 5000, planBudgetMs: 8000 }, scene: fakeScene({ delay: 300 }) });
+    const started = Date.now();
+    const planning = h.conductor.plan([], 8000, 'normal');
+    await sleep(20);
+    h.conductor.onGenerationStopped();
+    await planning;
+    assert.ok(Date.now() - started < 200);
 });
 
 test('continue cancels the pending observe for the last message', async () => {

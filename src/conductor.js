@@ -21,12 +21,16 @@ export function observeInput(chat, mesId, settings) {
 }
 
 /**
- * AI replies in the current run (after the last user message, before `before`) whose record is
- * missing or out of date, oldest first. Stops at the first reply with a current record.
+ * The latest run of AI replies before `before` (back to the user message that precedes them) whose
+ * record is missing or out of date, oldest first. Stops at the first reply with a current record.
+ * At plan time ST has already appended the user's new message, so trailing non-AI messages are
+ * stepped over first.
  */
 export function catchUpIndices(chat, before, settings, limit = CATCH_UP_LIMIT) {
     const indices = [];
-    for (let i = Math.min(before, chat.length) - 1; i >= 0 && indices.length < limit; i--) {
+    let start = Math.min(before, chat.length) - 1;
+    while (start >= 0 && !isAiMessage(chat[start])) start--;
+    for (let i = start; i >= 0 && indices.length < limit; i--) {
         const message = chat[i];
         if (message?.is_user) break;
         if (!isAiMessage(message)) continue;
@@ -74,7 +78,8 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         if (!isAiMessage(message)) return;
         const input = observeInput(chat, mesId, current);
         const recordAtStart = message.extra?.conductor;
-        const base = ownManualState(message) ?? readState(chat, { before: mesId });
+        const ownManual = ownManualState(message);
+        const base = ownManual ?? readState(chat, { before: mesId });
         const { userName, charName } = deps.names();
         const result = await runPhase(stages, {
             phase: 'observe',
@@ -103,9 +108,10 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
                 state: result.state, provenance: result.outputs.scene?.provenance ?? {}, source: 'scene', textHash: input.textHash,
             }));
         } else if (scene?.status === 'failed') {
-            // Labelled 'scene' even when copied from a manual record: it is not a new edit by the user.
+            // A copy of this message's own hand edit stays 'manual' so Retry still builds on it; a copy of
+            // an earlier message's state is labelled 'scene', because it is not an edit of this message.
             writeRecord(message, makeRecord({
-                state: base.state, provenance: base.record?.provenance ?? {}, source: 'scene',
+                state: base.state, provenance: base.record?.provenance ?? {}, source: ownManual ? 'manual' : 'scene',
                 stale: true, textHash: input.textHash,
             }));
         } else {
@@ -116,14 +122,16 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         deps.onUpdate();
     }
 
-    // Observes every reply of the current run that is not up to date, oldest first (the scheduler
-    // runs them in order), and waits up to observeWaitMs for the last one.
-    async function ensureObserved(chat, before, current) {
-        if (current.stages.scene?.enabled === false) return;
+    // Observes every reply of the latest run that is not up to date, oldest first (the scheduler
+    // runs them in order), and waits up to observeWaitMs for the last one. Stopping the generation
+    // ends the wait at once; the observes finish in the background.
+    async function ensureObserved(chat, before, current, signal) {
+        if (current.stages.scene?.enabled === false || signal.aborted) return;
         const indices = catchUpIndices(chat, before, current);
         if (!indices.length) return;
         for (const index of indices) scheduler.start(index);
-        await scheduler.flush(indices.at(-1), current.observeWaitMs);
+        const stopped = new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+        await Promise.race([scheduler.flush(indices.at(-1), current.observeWaitMs), stopped]);
     }
 
     async function plan(coreChat, contextSize, rawType) {
@@ -148,7 +156,7 @@ export function createConductor({ deps, stages, suppression, briefStore }) {
         // A swipe replaces the last AI message, so its state must not feed the new reply.
         const before = type === 'swipe' && isAiMessage(chat[chat.length - 1]) ? chat.length - 1 : chat.length;
 
-        await ensureObserved(chat, before, current);
+        await ensureObserved(chat, before, current, controller.signal);
         const { state } = readState(chat, { before });
         const result = await runPhase(stages, {
             phase: 'plan',
